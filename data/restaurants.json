@@ -1,0 +1,47 @@
+[
+  {
+    "name": "独墅湖畔轻食社",
+    "type": "轻食/简餐",
+    "avg_price": 32,
+    "distance": "1.2km",
+    "tags": ["清淡", "低脂", "适合学习日"],
+    "recommendation": "鸡胸肉藜麦碗，适合下午还有课的同学。",
+    "suitable_for": ["单人", "减脂", "不想排队"]
+  },
+  {
+    "name": "苏园砂锅小馆",
+    "type": "砂锅/家常菜",
+    "avg_price": 38,
+    "distance": "1.8km",
+    "tags": ["热乎", "微辣", "性价比"],
+    "recommendation": "番茄牛腩砂锅和菌菇豆腐砂锅都适合晚自习前吃。",
+    "suitable_for": ["双人", "聚餐", "雨天"]
+  },
+  {
+    "name": "星湖川味面馆",
+    "type": "面食/川味",
+    "avg_price": 28,
+    "distance": "900m",
+    "tags": ["辣", "面食", "出餐快"],
+    "recommendation": "担担面和红油抄手适合想吃辣但预算有限的时候。",
+    "suitable_for": ["单人", "赶时间", "重口味"]
+  },
+  {
+    "name": "月亮湾融合餐厅",
+    "type": "融合菜",
+    "avg_price": 72,
+    "distance": "2.5km",
+    "tags": ["聚餐", "环境好", "不太辣"],
+    "recommendation": "适合小组作业结束后的庆祝餐。",
+    "suitable_for": ["聚餐", "生日", "多人"]
+  },
+  {
+    "name": "校园北门煲仔饭",
+    "type": "米饭/快餐",
+    "avg_price": 26,
+    "distance": "700m",
+    "tags": ["米饭", "便宜", "饱腹"],
+    "recommendation": "腊味煲仔饭和滑鸡煲仔饭是稳妥选择。",
+    "suitable_for": ["单人", "高性价比", "晚餐"]
+  }
+]

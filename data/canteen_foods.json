@@ -1,0 +1,47 @@
+[
+  {
+    "canteen": "一食堂",
+    "window": "江南小炒",
+    "meal_time": "午餐",
+    "food_name": "番茄炒蛋盖饭",
+    "taste": "清淡",
+    "category": "米饭",
+    "reason": "稳定、便宜、不会太油，适合课间快速解决。"
+  },
+  {
+    "canteen": "一食堂",
+    "window": "面点窗口",
+    "meal_time": "早餐",
+    "food_name": "鸡蛋灌饼配豆浆",
+    "taste": "随便",
+    "category": "小吃",
+    "reason": "拿了就走，早八友好。"
+  },
+  {
+    "canteen": "二食堂",
+    "window": "西北面馆",
+    "meal_time": "晚餐",
+    "food_name": "牛肉拉面",
+    "taste": "重口",
+    "category": "面食",
+    "reason": "热汤碳水，适合晚自习前补能量。"
+  },
+  {
+    "canteen": "二食堂",
+    "window": "麻辣香锅",
+    "meal_time": "午餐",
+    "food_name": "微辣香锅双人份",
+    "taste": "重口",
+    "category": "米饭",
+    "reason": "适合和同学拼单，也容易按预算控制。"
+  },
+  {
+    "canteen": "三食堂",
+    "window": "健康轻食",
+    "meal_time": "晚餐",
+    "food_name": "虾仁蔬菜沙拉",
+    "taste": "清淡",
+    "category": "随机",
+    "reason": "晚上不想吃太撑时比较舒服。"
+  }
+]
