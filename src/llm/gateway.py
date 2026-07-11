@@ -1,11 +1,9 @@
 from src.auth.auth_service import get_default_model_config
-from src.config import DEFAULT_MODEL, DEFAULT_PROVIDER
 from src.llm.base import BaseLLMProvider
 from src.llm.providers import (
     DeepSeekProvider,
     KimiProvider,
     LLMProviderError,
-    MockLLMProvider,
     OpenAICompatibleProvider,
     QwenProvider,
     ZhipuProvider,
@@ -13,7 +11,6 @@ from src.llm.providers import (
 
 
 PROVIDER_MAP = {
-    "mock": MockLLMProvider,
     "openai-compatible": OpenAICompatibleProvider,
     "qwen": QwenProvider,
     "kimi": KimiProvider,
@@ -23,8 +20,7 @@ PROVIDER_MAP = {
 }
 
 PROVIDER_DEFAULTS = {
-    "mock": {"api_base": "", "model_name": "mock-agent"},
-    "openai-compatible": {"api_base": "https://api.example.com/v1", "model_name": "gpt-compatible-model"},
+    "openai-compatible": {"api_base": "https://api.openai.com/v1", "model_name": "gpt-4.1-mini"},
     "qwen": {"api_base": "https://dashscope.aliyuncs.com/compatible-mode/v1", "model_name": "qwen-plus"},
     "kimi": {"api_base": "https://api.moonshot.cn/v1", "model_name": "moonshot-v1-8k"},
     "deepseek": {"api_base": "https://api.deepseek.com", "model_name": "deepseek-chat"},
@@ -35,11 +31,11 @@ PROVIDER_DEFAULTS = {
 
 def build_provider(config: dict | None = None) -> BaseLLMProvider:
     if not config:
-        return MockLLMProvider(DEFAULT_MODEL)
-    provider_name = (config.get("provider") or DEFAULT_PROVIDER).lower()
-    cls = PROVIDER_MAP.get(provider_name, OpenAICompatibleProvider)
-    if provider_name == "mock":
-        return MockLLMProvider(config.get("model_name") or DEFAULT_MODEL)
+        raise LLMProviderError("尚未配置可用模型，请先在“订阅”页面添加并测试 API。")
+    provider_name = (config.get("provider") or "").strip().lower()
+    cls = PROVIDER_MAP.get(provider_name)
+    if cls is None:
+        raise LLMProviderError(f"不支持的模型服务商：{provider_name or '空'}。")
     missing_fields = [
         label
         for label, value in {
@@ -50,16 +46,16 @@ def build_provider(config: dict | None = None) -> BaseLLMProvider:
         if not value
     ]
     if missing_fields:
-        raise LLMProviderError(f"当前选择的是真实模型 {provider_name}，但配置缺少：{', '.join(missing_fields)}。")
+        raise LLMProviderError(f"当前模型配置缺少：{', '.join(missing_fields)}。")
     return cls(
-        model_name=config.get("model_name") or DEFAULT_MODEL,
-        api_base=config.get("api_base") or "",
-        api_key=config.get("api_key") or "",
+        model_name=config["model_name"],
+        api_base=config["api_base"],
+        api_key=config["api_key"],
     )
 
 
 def normalize_model_config(provider: str, api_base: str, api_key: str, model_name: str) -> dict:
-    provider_name = (provider or DEFAULT_PROVIDER).strip().lower()
+    provider_name = (provider or "custom").strip().lower()
     defaults = PROVIDER_DEFAULTS.get(provider_name, PROVIDER_DEFAULTS["custom"])
     normalized_base = (api_base or defaults["api_base"]).strip().rstrip("/")
     if normalized_base.endswith("/chat/completions"):
@@ -75,13 +71,7 @@ def normalize_model_config(provider: str, api_base: str, api_key: str, model_nam
 def test_model_config(config: dict) -> tuple[bool, str]:
     try:
         provider = build_provider(config)
-        if isinstance(provider, MockLLMProvider):
-            return True, "MockLLMProvider 可用。当前配置不会调用真实 API。"
-        test_method = getattr(provider, "test_connection", None)
-        if test_method:
-            return test_method()
-        provider.chat([{"role": "user", "content": "请只回复 OK。"}], temperature=0)
-        return True, "连接成功。"
+        return provider.test_connection()
     except LLMProviderError as exc:
         return False, str(exc)
 
@@ -90,18 +80,17 @@ def get_llm_for_user(user_id: int) -> BaseLLMProvider:
     return build_provider(get_default_model_config(user_id))
 
 
+def chat_with_user_messages(user_id: int, messages: list[dict], temperature: float = 0.7) -> str:
+    """Call the selected real model. Errors remain visible instead of silently changing providers."""
+    return get_llm_for_user(user_id).chat(messages, temperature=temperature)
+
+
 def chat_with_user_model(user_id: int, system_prompt: str, user_prompt: str, temperature: float = 0.7) -> str:
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_prompt},
-    ]
-    try:
-        provider = get_llm_for_user(user_id)
-        return provider.chat(messages, temperature=temperature)
-    except LLMProviderError as exc:
-        fallback = MockLLMProvider(DEFAULT_MODEL).chat(messages, temperature=temperature)
-        return (
-            "真实模型连接失败，已自动切换到离线 MockLLMProvider，保证 Demo 可以继续运行。\n\n"
-            f"失败原因：{exc}\n\n"
-            f"{fallback}"
-        )
+    return chat_with_user_messages(
+        user_id,
+        [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": user_prompt},
+        ],
+        temperature=temperature,
+    )

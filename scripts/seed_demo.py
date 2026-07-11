@@ -7,7 +7,8 @@ sys.path.insert(0, str(ROOT))
 from src.auth.auth_service import login_user, register_user
 from src.database import fetch_all, init_db
 from src.memory.memory_service import update_user_memory
-from src.modules.course_agent import ingest_course_document
+from src.rag.simple_vector_store import add_document_to_kb
+from src.rag.text_splitter import split_text
 from src.modules.todo_agent import parse_and_save_todos
 
 
@@ -25,7 +26,18 @@ def main() -> None:
     user_id = user["id"]
     existing_docs = fetch_all("SELECT id FROM documents WHERE user_id = ? AND title = ?", (user_id, "sample_course.txt"))
     if not existing_docs:
-        ingest_course_document(user_id, ROOT / "data" / "sample_course.txt", "sample_course.txt")
+        sample_path = ROOT / "data" / "sample_course.txt"
+        sample_text = sample_path.read_text(encoding="utf-8")
+        add_document_to_kb(
+            user_id,
+            "course",
+            "sample_course.txt",
+            split_text(sample_text),
+            str(sample_path),
+            source_format="txt",
+            original_text=sample_text,
+            processed_markdown=sample_text,
+        )
 
     existing_todos = fetch_all("SELECT id FROM todos WHERE user_id = ?", (user_id,))
     if not existing_todos:

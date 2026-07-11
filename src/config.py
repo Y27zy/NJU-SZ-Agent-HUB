@@ -13,8 +13,8 @@ load_dotenv(BASE_DIR / ".env")
 
 APP_NAME = os.getenv("APP_NAME", "NJU-SZ Agent Hub")
 DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///storage/app.db")
-DEFAULT_PROVIDER = os.getenv("DEFAULT_PROVIDER", "mock")
-DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "mock-agent")
+DEFAULT_PROVIDER = os.getenv("DEFAULT_PROVIDER", "")
+DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "")
 USE_SYSTEM_PROXY = os.getenv("USE_SYSTEM_PROXY", "false").lower() in {"1", "true", "yes", "on"}
 
 

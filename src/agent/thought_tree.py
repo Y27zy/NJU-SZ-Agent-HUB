@@ -1,16 +1,14 @@
 from src.llm.base import BaseLLMProvider
-from src.llm.providers import MockLLMProvider
 
 
-def generate_candidate_plans(task: str, context: str, n: int = 3, llm: BaseLLMProvider | None = None) -> list[str]:
-    provider = llm or MockLLMProvider()
+def generate_candidate_plans(task: str, context: str, n: int, llm: BaseLLMProvider) -> list[str]:
     candidates = []
-    for i in range(n):
+    for index in range(n):
         prompt = (
             f"任务：{task}\n上下文：{context}\n"
-            f"请生成第 {i + 1} 个候选计划，强调可执行性、优先级和时间安排。"
+            f"请生成第 {index + 1} 个候选计划。它需要与其他方案采用不同策略，并明确优先级、时间安排、子任务和复盘节点。"
         )
-        candidates.append(provider.chat([{"role": "user", "content": prompt}], temperature=0.8))
+        candidates.append(llm.chat([{"role": "user", "content": prompt}], temperature=0.75))
     return candidates
 
 
@@ -19,9 +17,13 @@ def evaluate_plan(plan: str, task: str, context: str) -> dict:
     keywords = ["截止", "优先", "复盘", "上午", "下午", "晚上", "子任务", "时间"]
     score += sum(6 for word in keywords if word in plan)
     score += min(len(plan) // 80, 20)
-    if "最高优先级" in plan or "高优先级" in plan:
+    if "高优先级" in plan or "最高优先级" in plan:
         score += 8
-    return {"plan": plan, "score": min(score, 100), "reason": "根据可执行性、时间结构和优先级表达进行轻量评分。"}
+    return {
+        "plan": plan,
+        "score": min(score, 100),
+        "reason": "依据可执行性、时间结构和优先级表达进行轻量评分。",
+    }
 
 
 def select_best_plan(candidates: list[str], task: str = "", context: str = "") -> dict:
@@ -29,7 +31,6 @@ def select_best_plan(candidates: list[str], task: str = "", context: str = "") -
     return max(evaluated, key=lambda item: item["score"]) if evaluated else {"plan": "", "score": 0, "reason": "无候选方案"}
 
 
-def dynamic_thought_tree(task: str, context: str, llm: BaseLLMProvider | None = None) -> dict:
+def dynamic_thought_tree(task: str, context: str, llm: BaseLLMProvider) -> dict:
     candidates = generate_candidate_plans(task, context, n=3, llm=llm)
-    best = select_best_plan(candidates, task, context)
-    return {"task": task, "candidates": candidates, "best": best}
+    return {"task": task, "candidates": candidates, "best": select_best_plan(candidates, task, context)}
