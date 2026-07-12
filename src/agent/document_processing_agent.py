@@ -2,6 +2,7 @@ import json
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from collections.abc import Callable
 
 from src.auth.auth_service import get_default_model_config
 from src.llm.gateway import chat_with_user_model
@@ -32,14 +33,19 @@ class ProcessedDocument:
     audit_issues: list[dict]
 
 
+class DocumentProcessingCancelled(RuntimeError):
+    """Raised when a user cancels a document processing operation."""
+
+
 class DocumentProcessingAgent:
     """Agent that plans, reconstructs, audits, and repairs one complete document."""
 
-    VERSION = "2.0"
+    VERSION = "3.0"
 
-    def __init__(self, user_id: int, progress=None):
+    def __init__(self, user_id: int, progress=None, cancel_check: Callable[[], bool] | None = None):
         self.user_id = user_id
         self.progress = progress
+        self.cancel_check = cancel_check
         self.model_config = get_default_model_config(user_id)
         if not self.model_config:
             raise ValueError("尚未配置默认模型，无法启动文档处理 Agent。")
@@ -51,6 +57,10 @@ class DocumentProcessingAgent:
     def _notify(self, current: int, total: int, message: str) -> None:
         if self.progress:
             self.progress(current, total, message)
+
+    def _raise_if_cancelled(self) -> None:
+        if self.cancel_check and self.cancel_check():
+            raise DocumentProcessingCancelled("用户已取消重新整理，已保留原有资料版本。")
 
     def _cache_path(self, source_path: Path) -> Path:
         return source_path.with_name(f".{source_path.name}.document-agent-cache.json")
@@ -188,57 +198,108 @@ class DocumentProcessingAgent:
                 repaired = self._replace_chapter(repaired, title, fixed)
         return repaired
 
-    def run(self, path: str | Path, title: str, doc_type: str) -> ProcessedDocument:
-        from src.rag.document_processor import _clean_chapter, _plan_structure
+    @staticmethod
+    def _cached_result(data: dict) -> ProcessedDocument | None:
+        """Restore a completed result from a matching cache entry."""
+        result = data.get("result")
+        if not isinstance(result, dict):
+            return None
+        try:
+            return ProcessedDocument(
+                original_text=str(result["original_text"]),
+                markdown=str(result["markdown"]),
+                page_count=int(result["page_count"]),
+                structure_json=str(result["structure_json"]),
+                model_name=str(result["model_name"]),
+                audit_issues=list(result.get("audit_issues") or []),
+            )
+        except (KeyError, TypeError, ValueError):
+            return None
+
+    def run(self, path: str | Path, title: str, doc_type: str, force: bool = False) -> ProcessedDocument:
+        from src.rag.document_processor import (
+            _clean_chapter,
+            _clean_complete_document,
+            _deduplicate_markdown,
+            _document_profile,
+            _plan_structure,
+            _structure_from_markdown,
+        )
 
         source_path = Path(path)
-        cache = self._load_cache(source_path)
+        self._raise_if_cancelled()
+        cache = {} if force else self._load_cache(source_path)
+        cached_result = self._cached_result(cache)
+        if cached_result:
+            self._notify(5, 5, "已读取同一文件与模型的完整处理结果")
+            return cached_result
         self._notify(0, 5, f"文档处理 Agent 已启动：{self.model_name}")
         pages = self._load_pages(source_path)
+        self._raise_if_cancelled()
         if not pages:
             raise ValueError("文档没有可处理的正文。")
 
-        self._notify(1, 5, "正在通读分页内容并规划全文章节")
-        structure = cache.get("structure")
-        if not structure:
-            structure = _plan_structure(self.user_id, title, doc_type, pages)
-            cache["structure"] = structure
-            cache["chapters"] = {}
-            self._save_cache(source_path, cache)
-        markdown_sections = [f"# {structure['document_title']}"]
-        chapters = structure["chapters"]
-        for index, chapter in enumerate(chapters, 1):
-            cache_key = f"{chapter['start_page']}:{chapter['end_page']}:{chapter['title']}"
-            chapter_markdown = (cache.get("chapters") or {}).get(cache_key)
-            if chapter_markdown:
-                self._notify(index, len(chapters), f"读取已完成章节 {index}/{len(chapters)}：{chapter['title']}")
-            else:
-                self._notify(index, len(chapters), f"逐章重建 {index}/{len(chapters)}：{chapter['title']}")
-                chapter_markdown = _clean_chapter(self.user_id, chapter, pages, chapter["title"])
-                cache.setdefault("chapters", {})[cache_key] = chapter_markdown
-                self._save_cache(source_path, cache)
-            markdown_sections.append(chapter_markdown)
-        markdown = "\n\n".join(markdown_sections)
+        profile = _document_profile(pages, title, doc_type)
+        cache["profile"] = profile
+        self._notify(1, 5, f"文档画像完成，采用 {profile['strategy']} 策略")
 
-        self._notify(3, 5, "正在审计章节、公式、段落和页码锚点")
+        if profile["strategy"] == "compact_complete":
+            markdown = cache.get("complete_markdown")
+            if not markdown:
+                self._notify(2, 5, "正在一次性恢复完整短文档，避免章节重叠")
+                markdown = _clean_complete_document(self.user_id, title, pages)
+                self._raise_if_cancelled()
+                cache["complete_markdown"] = markdown
+                self._save_cache(source_path, cache)
+            structure = _structure_from_markdown(markdown, title, len(pages), doc_type)
+        else:
+            self._notify(1, 5, "正在通读分页内容并规划真实主章节")
+            structure = cache.get("structure")
+            if not structure:
+                structure = _plan_structure(self.user_id, title, doc_type, pages)
+                self._raise_if_cancelled()
+                cache["structure"] = structure
+                cache["chapters"] = {}
+                self._save_cache(source_path, cache)
+            markdown_sections = [f"# {structure['document_title']}"]
+            chapters = structure["chapters"]
+            for index, chapter in enumerate(chapters, 1):
+                cache_key = f"{chapter['start_page']}:{chapter['end_page']}:{chapter['title']}"
+                chapter_markdown = (cache.get("chapters") or {}).get(cache_key)
+                if chapter_markdown:
+                    self._notify(index, len(chapters), f"读取已完成章节 {index}/{len(chapters)}：{chapter['title']}")
+                else:
+                    self._notify(index, len(chapters), f"重建主章节 {index}/{len(chapters)}：{chapter['title']}")
+                    chapter_markdown = _clean_chapter(self.user_id, chapter, pages, chapter["title"])
+                    self._raise_if_cancelled()
+                    cache.setdefault("chapters", {})[cache_key] = chapter_markdown
+                    self._save_cache(source_path, cache)
+                markdown_sections.append(chapter_markdown)
+            markdown = "\n\n".join(markdown_sections)
+
+        markdown = _deduplicate_markdown(markdown)
+
+        self._notify(4, 5, "正在执行本地完整性、重复内容与公式定界检查")
         issues = self._local_issues(markdown, structure)
-        issues.extend(self._audit(markdown, structure))
+        # Remote auditing used to add another full-document call and could cascade
+        # into many repair calls. Deterministic checks now handle routine quality
+        # control; the model is asked to repair only a concrete detected issue.
         if issues:
             markdown = self._repair(markdown, issues)
+            self._raise_if_cancelled()
+            markdown = _deduplicate_markdown(markdown)
 
         structure["processing"] = {
             "agent": "DocumentProcessingAgent",
             "version": self.VERSION,
             "model": self.model_name,
+            "strategy": profile["strategy"],
+            "character_count": profile["character_count"],
             "audit_issue_count": len(issues),
         }
         original = "\n\n".join(f"[PAGE {index}]\n{text}" for index, text in enumerate(pages, 1))
         self._notify(5, 5, "章节化文档已通过处理流水线")
-        try:
-            self._cache_path(source_path).unlink(missing_ok=True)
-        except OSError:
-            pass
-        return ProcessedDocument(
+        result = ProcessedDocument(
             original_text=original,
             markdown=markdown,
             page_count=len(pages),
@@ -246,3 +307,13 @@ class DocumentProcessingAgent:
             model_name=self.model_name,
             audit_issues=issues,
         )
+        cache["result"] = {
+            "original_text": result.original_text,
+            "markdown": result.markdown,
+            "page_count": result.page_count,
+            "structure_json": result.structure_json,
+            "model_name": result.model_name,
+            "audit_issues": result.audit_issues,
+        }
+        self._save_cache(source_path, cache)
+        return result

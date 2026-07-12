@@ -2,8 +2,9 @@ from pathlib import Path
 
 import streamlit as st
 
+from src.agent.document_jobs import cancel_document_job, discard_document_job, get_document_job, start_reprocess_job
 from src.agent.reading_jobs import cancel_reading_job, discard_reading_job, get_reading_job, start_reading_job
-from src.auth.auth_service import activate_model_config, get_default_model_config, list_model_configs
+from src.auth.auth_service import activate_model_config, get_default_model_config, is_admin, list_model_configs
 from src.modules.library_agent import (
     add_canvas_note,
     create_folder,
@@ -19,8 +20,16 @@ from src.modules.library_agent import (
     update_canvas_node,
 )
 from src.modules.paper_agent import summarize_paper
-from src.rag.document_processor import process_document, reprocess_document
-from src.rag.simple_vector_store import get_document, get_document_chunks, list_documents
+from src.rag.document_processor import process_document
+from src.rag.simple_vector_store import (
+    delete_library_document,
+    can_edit_library_document,
+    get_library_document,
+    get_document_chunks,
+    list_library_documents,
+    update_document_markdown,
+)
+from src.config import UPLOAD_DIR
 from src.ui.library_components import render_collection, render_library_hall, render_study_workspace
 from src.ui.reader_api import ensure_reader_api_server
 from src.utils.file_storage import safe_upload_path
@@ -36,6 +45,7 @@ CATEGORY_LABELS = {
     "exam": "真题与备考",
     "shared": "校园共享",
 }
+SHARED_LIBRARY_SCOPES = ("course", "paper", "other", "public", "exam", "shared")
 ACTION_LABELS = {
     "explain": "解释这一步",
     "example": "给一个例子",
@@ -68,32 +78,60 @@ def inject_library_theme(workspace: bool = False) -> None:
     )
 
 
-def _category_data(documents: list[dict]) -> list[dict]:
+def _category_data(documents: list[dict], admin: bool) -> list[dict]:
+    def count_scope(scope: str) -> int:
+        direct = sum(doc.get("library_scope") == scope for doc in documents)
+        if admin:
+            return direct
+        # Existing personal documents predate explicit library scopes. Keep their
+        # previous course/paper/other filtering behavior without publishing them.
+        legacy = sum(
+            doc.get("library_scope", "custom") == "custom" and doc.get("doc_type") == scope
+            for doc in documents
+        ) if scope in {"course", "paper", "other"} else 0
+        return direct + legacy
+
     counts = {
         "all": len(documents),
-        "course": sum(doc["doc_type"] == "course" for doc in documents),
-        "paper": sum(doc["doc_type"] == "paper" for doc in documents),
-        "other": sum(doc["doc_type"] == "other" for doc in documents),
-        "custom": len(documents),
-        "public": 0,
-        "exam": 0,
-        "shared": 0,
+        "course": count_scope("course"),
+        "paper": count_scope("paper"),
+        "other": count_scope("other"),
+        "custom": sum(doc.get("library_scope", "custom") == "custom" for doc in documents),
+        "public": sum(doc.get("library_scope") == "public" for doc in documents),
+        "exam": sum(doc.get("library_scope") == "exam" for doc in documents),
+        "shared": sum(doc.get("library_scope") == "shared" for doc in documents),
     }
+    visible_categories = ["all", *SHARED_LIBRARY_SCOPES] if admin else list(CATEGORY_LABELS)
     return [
-        {"key": key, "label": CATEGORY_LABELS[key], "count": counts[key], "featured": key == "custom", "disabled": key in {"public", "exam", "shared"}, "note": "筹备中" if key in {"public", "exam", "shared"} else ""}
-        for key in CATEGORY_LABELS
+        {
+            "key": key,
+            "label": CATEGORY_LABELS[key],
+            "count": counts[key],
+            "featured": key == "custom",
+            "disabled": False,
+            "note": "管理员维护" if key in {"public", "exam", "shared"} and admin else "",
+        }
+        for key in visible_categories
     ]
 
 
 def _filtered_documents(documents: list[dict], category: str) -> list[dict]:
-    if category in {"all", "custom"}:
+    if category == "all":
         return documents
+    if category == "custom":
+        return [doc for doc in documents if doc.get("library_scope", "custom") == "custom"]
+    if category in {"public", "exam", "shared"}:
+        return [doc for doc in documents if doc.get("library_scope") == category]
     if category in {"course", "paper", "other"}:
-        return [doc for doc in documents if doc["doc_type"] == category]
+        return [
+            doc for doc in documents
+            if doc.get("library_scope") == category
+            or (doc.get("library_scope", "custom") == "custom" and doc.get("doc_type") == category)
+        ]
     return []
 
 
-def _document_rows(documents: list[dict]) -> list[dict]:
+def _document_rows(documents: list[dict], user_id: int, admin: bool) -> list[dict]:
     kind_labels = {"course": "课程", "paper": "论文", "other": "资料"}
     status_labels = {"ready": "可学习", "processing": "处理中", "error": "处理失败"}
     return [
@@ -103,6 +141,9 @@ def _document_rows(documents: list[dict]) -> list[dict]:
             "kind": kind_labels.get(doc["doc_type"], "资料"),
             "status": status_labels.get(doc.get("processing_status"), "可学习"),
             "pages": doc.get("page_count") or 0,
+            "global": bool(doc.get("is_global")),
+            "can_delete": (not bool(doc.get("is_global")) and int(doc["user_id"]) == user_id) or (admin and bool(doc.get("is_global"))),
+            "can_reprocess": (not bool(doc.get("is_global")) and int(doc["user_id"]) == user_id) or (admin and bool(doc.get("is_global"))),
         }
         for doc in documents
     ]
@@ -115,8 +156,26 @@ def _save_upload(user_id: int, uploaded) -> str:
 
 
 @st.dialog("构建新资料", width="large")
-def show_document_builder(user_id: int) -> None:
-    st.markdown("### 从原文件构建可交互资料")
+def show_document_builder(user_id: int, library_scope: str = "custom", admin: bool = False) -> None:
+    if library_scope != "custom" and not admin:
+        st.error("只有管理员可以向公共资料库添加资料。")
+        return
+    if admin:
+        scope_options = list(SHARED_LIBRARY_SCOPES)
+    elif library_scope in CATEGORY_LABELS and library_scope != "all":
+        scope_options = [library_scope]
+    else:
+        scope_options = ["custom", *SHARED_LIBRARY_SCOPES]
+    default_scope = library_scope if library_scope in scope_options else scope_options[0]
+    target_scope = st.selectbox(
+        "发布到" if admin else "资料库",
+        scope_options,
+        index=scope_options.index(default_scope),
+        format_func=lambda value: CATEGORY_LABELS[value],
+        disabled=not admin,
+    )
+    scope_name = CATEGORY_LABELS[target_scope]
+    st.markdown(f"### 向{scope_name}构建新资料")
     st.caption("系统会提取文本；扫描页走多模态 OCR；随后恢复标题、段落、表格和 LaTeX，生成可划选原文。")
     uploaded = st.file_uploader(
         "拖入 PDF、PPTX、TXT 或 Markdown",
@@ -128,15 +187,16 @@ def show_document_builder(user_id: int) -> None:
         doc_type = st.selectbox(
             "资料用途",
             ["course", "paper", "other"],
+            index=["course", "paper", "other"].index(target_scope) if target_scope in {"course", "paper", "other"} else 2,
             format_func=lambda value: {"course": "课程学习", "paper": "论文研读", "other": "其他资料"}[value],
         )
     with right:
         folders = ensure_default_folders(user_id)
         folder_options = [None, *[folder["id"] for folder in folders]]
         folder_id = st.selectbox(
-            "保存到",
+            "保存到个人文件夹" if target_scope == "custom" else "管理员文件夹",
             folder_options,
-            format_func=lambda value: "自定义资料库（根目录）" if value is None else next(folder["name"] for folder in folders if folder["id"] == value),
+            format_func=lambda value: f"{scope_name}（根目录）" if value is None else next(folder["name"] for folder in folders if folder["id"] == value),
         )
     folder_input, folder_action = st.columns([0.78, 0.22], vertical_alignment="bottom")
     folder_name = folder_input.text_input("新建文件夹", placeholder="例如：机器学习导论")
@@ -163,10 +223,12 @@ def show_document_builder(user_id: int) -> None:
                 doc_type,
                 folder_id,
                 update_progress,
+                target_scope,
+                admin,
             )
             st.session_state.library_document_id = document_id
             st.session_state.library_view = "collection"
-            st.success("资料构建完成，已加入自定义资料库。")
+            st.success(f"资料构建完成，已加入{scope_name}。")
             st.rerun()
         except Exception as exc:
             st.error(f"构建失败：{exc}")
@@ -190,35 +252,70 @@ def _event_is_new(name: str, event) -> bool:
 def _document_markdown(user_id: int, document: dict) -> str:
     source = document.get("processed_markdown") or document.get("original_text") or ""
     if not source:
-        source = "\n\n".join(item["content"] for item in get_document_chunks(user_id, document_id=document["id"]))
+        source = "\n\n".join(item["content"] for item in get_document_chunks(document["user_id"], document_id=document["id"]))
     return source
 
 
-def _render_hall(user_id: int, documents: list[dict]) -> None:
-    event = render_library_hall(_category_data(documents))
+@st.dialog("编辑资料正文", width="large")
+def show_document_editor(user_id: int, document: dict, admin: bool) -> None:
+    """Let an owner or administrator correct rendered Markdown and rebuild the document index."""
+    st.caption("保存后会立即更新阅读器正文与本资料的 RAG 索引；原始上传文件保持不变。")
+    current = _document_markdown(user_id, document)
+    content = st.text_area(
+        "Markdown 正文",
+        value=current,
+        height=560,
+        key=f"document_editor_{document['id']}",
+    )
+    cancel, save = st.columns(2)
+    if cancel.button("取消", use_container_width=True):
+        st.session_state.pop("library_edit_document", None)
+        st.rerun()
+    if save.button("保存正文修改", type="primary", use_container_width=True):
+        if update_document_markdown(user_id, int(document["id"]), content, admin=admin):
+            st.session_state.pop("library_edit_document", None)
+            st.success("正文和索引已更新。")
+            st.rerun()
+        st.error("保存失败：你没有权限，或正文不能为空。")
+
+
+def _render_hall(user_id: int, documents: list[dict], admin: bool) -> None:
+    event = render_library_hall(_category_data(documents, admin))
     if _event_is_new("hall", event):
         st.session_state.library_category = event["key"]
         st.session_state.library_view = "collection"
         st.rerun()
 
 
-def _render_collection(user_id: int, documents: list[dict]) -> None:
+def _render_collection(user_id: int, documents: list[dict], admin: bool) -> None:
     category = st.session_state.get("library_category", "custom")
-    categories = _category_data(documents)
+    if admin and category not in {"all", *SHARED_LIBRARY_SCOPES}:
+        category = "all"
+        st.session_state.library_category = category
+    categories = _category_data(documents, admin)
     filtered = _filtered_documents(documents, category)
-    result = render_collection(categories, _document_rows(filtered), category, CATEGORY_LABELS.get(category, "自定义资料库"))
+    job_id = st.session_state.get("library_reprocess_job", "")
+    job = get_document_job(job_id, user_id) if job_id else None
+    result = render_collection(
+        categories,
+        _document_rows(filtered, user_id, admin),
+        category,
+        CATEGORY_LABELS.get(category, "自定义资料库"),
+        can_add=True,
+        active_job=job,
+    )
     if _event_is_new("collection_command", result.command):
         if result.command["name"] == "back":
             st.session_state.library_view = "hall"
             st.rerun()
         if result.command["name"] == "add":
-            show_document_builder(user_id)
+            show_document_builder(user_id, category, admin)
     if _event_is_new("collection_category", result.category):
         st.session_state.library_category = result.category["key"]
         st.rerun()
     if _event_is_new("collection_open", result.open_document):
         document_id = int(result.open_document["id"])
-        document = get_document(user_id, document_id)
+        document = get_library_document(user_id, document_id)
         if document and (document.get("processing_status") or "ready") == "ready":
             st.session_state.library_document_id = document_id
             st.session_state.library_view = "workspace"
@@ -227,9 +324,42 @@ def _render_collection(user_id: int, documents: list[dict]) -> None:
             st.toast("这份资料尚未处理完成。")
     if _event_is_new("collection_reprocess", result.reprocess_document):
         document_id = int(result.reprocess_document["id"])
-        with st.spinner("正在重新识别整份资料的章节结构并排版，请不要关闭页面..."):
-            reprocess_document(user_id, document_id)
-        st.success("资料已按章节重新整理。")
+        document = get_library_document(user_id, document_id)
+        if document and int(document["user_id"]) == user_id:
+            st.session_state.library_reprocess_job = start_reprocess_job(user_id, document_id)
+            st.toast("已开始重新整理，可随时取消。")
+        else:
+            st.error("只有资料所有者可以重新整理。")
+        st.rerun()
+    if _event_is_new("collection_delete", result.delete_document):
+        document_id = int(result.delete_document["id"])
+        document = get_library_document(user_id, document_id)
+        if document and delete_library_document(user_id, document_id, admin=admin):
+            path = Path(document.get("file_path") or "")
+            if path.is_file() and path.resolve().is_relative_to(UPLOAD_DIR.resolve()):
+                path.unlink(missing_ok=True)
+            st.toast("资料已删除。")
+        else:
+            st.error("你没有删除这份资料的权限。")
+        st.rerun()
+    if _event_is_new("collection_reprocess_job", result.reprocess_job):
+        event = result.reprocess_job
+        active_id = str(event.get("job_id") or job_id)
+        if event.get("action") == "cancel":
+            if cancel_document_job(active_id, user_id):
+                st.toast("已请求取消，当前模型调用结束后会保留原有版本。")
+            st.rerun()
+        active = get_document_job(active_id, user_id)
+        if active and active["status"] in {"completed", "cancelled", "failed"}:
+            st.session_state.pop("library_reprocess_job", None)
+            discard_document_job(active_id, user_id)
+            if active["status"] == "completed":
+                st.success("资料已按当前模型重新整理。")
+            elif active["status"] == "cancelled":
+                st.info("已取消重新整理，原有资料版本保持不变。")
+            else:
+                st.error(f"重新整理失败：{active['error'] or '未知错误'}")
+            st.rerun()
         st.rerun()
 
 
@@ -279,10 +409,14 @@ def _workspace_nodes(user_id: int, document_id: int) -> list[dict]:
 def _render_workspace(user_id: int) -> None:
     inject_library_theme(workspace=True)
     document_id = st.session_state.get("library_document_id")
-    document = get_document(user_id, document_id) if document_id else None
+    document = get_library_document(user_id, document_id) if document_id else None
     if not document:
         st.session_state.library_view = "collection"
         st.rerun()
+    admin = is_admin(user_id)
+    can_edit_document = can_edit_library_document(user_id, document, admin=admin)
+    if st.session_state.get("library_edit_document") == int(document["id"]):
+        show_document_editor(user_id, document, admin)
     models, current_model = _workspace_models(user_id)
     highlights = list_highlights(user_id, document["id"])
     reader_api = ensure_reader_api_server()
@@ -305,6 +439,7 @@ def _render_workspace(user_id: int) -> None:
         user_id=user_id,
         api_base=reader_api["base_url"],
         api_token=reader_api["token"],
+        can_edit_document=can_edit_document,
     )
     if _event_is_new("workspace_command", result.command):
         if result.command["name"] == "back":
@@ -315,6 +450,11 @@ def _render_workspace(user_id: int) -> None:
             st.session_state.active_page = "订阅"
             st.session_state.pop("top_navigation_pills", None)
             st.rerun()
+        if result.command["name"] == "edit-document":
+            if can_edit_document:
+                st.session_state.library_edit_document = int(document["id"])
+                st.rerun()
+            st.error("这份全局资料仅管理员可以修改。")
     if _event_is_new("workspace_model", result.model):
         activate_model_config(user_id, int(result.model["id"]))
         st.rerun()
@@ -413,13 +553,14 @@ def _render_workspace(user_id: int) -> None:
 
 
 def render_library_page(user_id: int) -> None:
+    admin = is_admin(user_id)
     view = st.session_state.get("library_view", "hall")
     if view == "workspace":
         _render_workspace(user_id)
         return
     inject_library_theme()
-    documents = list_documents(user_id)
+    documents = list_library_documents(user_id, admin=admin)
     if view == "collection":
-        _render_collection(user_id, documents)
+        _render_collection(user_id, documents, admin)
     else:
-        _render_hall(user_id, documents)
+        _render_hall(user_id, documents, admin)

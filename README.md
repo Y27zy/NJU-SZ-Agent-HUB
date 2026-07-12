@@ -182,17 +182,27 @@ POST {api_base}/chat/completions
 ```text
 上传原文件
   -> DocumentProcessingAgent 取得用户当前默认模型
-  -> PyMuPDF/python-pptx 提取并保留分页锚点
+  -> PyMuPDF/python-pptx 提取，恢复单栏/双栏阅读顺序并保留分页锚点
   -> 文字不足的页面调用多模态 OCR
-  -> 全文结构侦察，生成严格章节 JSON
-  -> 按章节分片恢复标题、段落、表格与 LaTeX
-  -> 质量审计并只返修有问题的章节
-  -> 章节检查点支持超时后断点续跑
+  -> 文档画像判断短提纲、教程或学术论文
+  -> 短资料整份一次重建；长文档按不重叠主章节重建
+  -> 本地去除重复页眉、重复段落并统一 LaTeX 定界符
+  -> 只对确定发现的问题请求模型返修
+  -> 章节检查点与完整结果缓存支持断点续跑
   -> 保存原始文本和结构化 Markdown
   -> chunk 与 TF-IDF 索引
 ```
 
-`DocumentProcessingAgent` 位于 `src/agent/document_processing_agent.py`。上传与“重新整理”统一调用该 Agent；它不会写死 Qwen，而是动态使用当前用户在“订阅”页面选中的默认模型。扫描 PDF 要求该模型支持 OpenAI-compatible 图片输入。转换遵循“忠于原文、不总结、不补写”的提示词，但 AI 识别仍可能出错，重要公式和数据应对照原 PDF 核验。
+`DocumentProcessingAgent` 位于 `src/agent/document_processing_agent.py`。上传与“重新整理”统一调用该 Agent；它不会写死 Qwen，而是动态使用当前用户在“订阅”页面选中的默认模型。短提纲和普通教程通常只进行一次正文模型调用，避免目录项共享同一页时被逐章重复扩写；双栏论文会先恢复阅读顺序，再按真实主章节处理。扫描 PDF 要求该模型支持 OpenAI-compatible 图片输入。转换遵循“忠于原文、不总结、不补写”的提示词，但 AI 识别仍可能出错，重要公式和数据应对照原 PDF 核验。
+
+### 资料库权限
+
+- 自定义资料库：资料、原文件、索引和个人阅读记录仅本人可见；本人可删除、重新整理和编辑正文。
+- 任意资料分类：普通用户新增的是“仅自己可见”的本地资料，可自行删改；管理员新增的是“全局同步”资料，所有账号都会看到同一份最新内容。
+- 全局同步资料：普通用户只能阅读、提问和标记；只有管理员可以删除、重新整理或编辑正文。管理员的正文修改会同步给全部账号，并重建该资料的检索索引。
+- 重新整理在后台执行。点击“取消重新整理”会在当前模型请求结束后停止后续处理，并保留原有资料版本。
+
+本地课程 Demo 会在初始化数据库时创建管理员：用户名 `admin`，密码 `123456`。管理员资料库只展示全局同步资料；自定义资料库始终归各自用户所有。可在 `.env` 中通过 `DEFAULT_ADMIN_USERNAME` 与 `DEFAULT_ADMIN_PASSWORD` 修改；部署前务必改为私有强密码。
 
 ## 11. 交互式阅读与上下文
 
@@ -250,6 +260,12 @@ D:\miniconda3\envs\IntroML\python.exe -m unittest discover -s tests -v
 ```
 
 FoodAgent 测试不会调用真实 API，覆盖三类意图路由、硬过滤、会话排除、周更新隔离、旧数据迁移和无 LLM 快捷筛选。真实模型连接请在“订阅”页面单独测试。
+
+可以用当前账号的默认模型批量评估文档处理效果。脚本会在 `storage/document_benchmarks/` 输出 Markdown、结构 JSON，以及耗时、章节数和重复段落统计：
+
+```powershell
+D:\miniconda3\envs\IntroML\python.exe scripts\evaluate_document_agent.py --username youzy "D:\path\a.pdf" "D:\path\b.pdf"
+```
 
 ## 17. 后续扩展与 README 转 PDF
 

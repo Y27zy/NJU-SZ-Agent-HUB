@@ -6,6 +6,7 @@ from src.ui.about_page import render_about_page
 from src.ui.dashboard_page import render_dashboard_page
 from src.ui.food_page import render_food_page
 from src.ui.library_page import render_library_page
+from src.auth.auth_service import get_user_profile
 from src.ui.login_page import logout, show_auth_dialog
 from src.ui.model_settings_page import render_model_settings_page
 from src.ui.theme import inject_theme
@@ -43,7 +44,7 @@ def render_top_navigation() -> str:
         with account:
             if user:
                 with st.popover(user["username"], use_container_width=True):
-                    st.caption("个人账号")
+                    st.caption("管理员账户" if user.get("is_admin") else "个人账号")
                     if st.button("退出登录", use_container_width=True):
                         logout()
             elif st.button("登录 / 注册", type="primary", use_container_width=True):
@@ -60,6 +61,10 @@ def main() -> None:
     if "user" not in st.session_state:
         st.session_state.user = None
     user = st.session_state.user
+    if user:
+        refreshed_user = get_user_profile(int(user["id"]))
+        st.session_state.user = refreshed_user
+        user = refreshed_user
     in_workspace = bool(
         user
         and st.session_state.get("active_page") == "资料库"

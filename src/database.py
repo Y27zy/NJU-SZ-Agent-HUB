@@ -30,6 +30,7 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 username TEXT NOT NULL UNIQUE,
                 password_hash TEXT NOT NULL,
+                is_admin INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL
             );
 
@@ -59,6 +60,8 @@ def init_db() -> None:
                 processing_error TEXT,
                 page_count INTEGER NOT NULL DEFAULT 0,
                 structure_json TEXT,
+                library_scope TEXT NOT NULL DEFAULT 'custom',
+                is_global INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT,
                 FOREIGN KEY(user_id) REFERENCES users(id)
@@ -185,8 +188,48 @@ def init_db() -> None:
             """
         )
         _migrate_documents(conn)
+        _migrate_users(conn)
         _migrate_canvas_tables(conn)
         _migrate_todos(conn)
+        _ensure_default_admin(conn)
+
+
+def _migrate_users(conn: sqlite3.Connection) -> None:
+    """Add the local administrator flag to databases from earlier versions."""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()}
+    if "is_admin" not in existing:
+        conn.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+
+
+def _ensure_default_admin(conn: sqlite3.Connection) -> None:
+    """Create or migrate the documented local-demo administrator exactly once."""
+    from src.auth.auth_service import hash_password
+    from src.config import DEFAULT_ADMIN_PASSWORD, DEFAULT_ADMIN_USERNAME
+
+    if not DEFAULT_ADMIN_USERNAME or not DEFAULT_ADMIN_PASSWORD:
+        return
+    existing = conn.execute("SELECT id FROM users WHERE username = ?", (DEFAULT_ADMIN_USERNAME,)).fetchone()
+    if existing:
+        if not conn.execute("SELECT 1 FROM users WHERE is_admin = 1 LIMIT 1").fetchone():
+            conn.execute(
+                "UPDATE users SET is_admin = 1, password_hash = ? WHERE id = ?",
+                (hash_password(DEFAULT_ADMIN_PASSWORD), existing["id"]),
+            )
+        return
+
+    legacy = conn.execute("SELECT id FROM users WHERE username = 'nju_admin' AND is_admin = 1 LIMIT 1").fetchone()
+    if legacy:
+        conn.execute(
+            "UPDATE users SET username = ?, password_hash = ? WHERE id = ?",
+            (DEFAULT_ADMIN_USERNAME, hash_password(DEFAULT_ADMIN_PASSWORD), legacy["id"]),
+        )
+        return
+    if conn.execute("SELECT 1 FROM users WHERE is_admin = 1 LIMIT 1").fetchone():
+        return
+    conn.execute(
+        "INSERT INTO users (username, password_hash, is_admin, created_at) VALUES (?, ?, 1, ?)",
+        (DEFAULT_ADMIN_USERNAME, hash_password(DEFAULT_ADMIN_PASSWORD), now_iso()),
+    )
 
 
 def _migrate_documents(conn: sqlite3.Connection) -> None:
@@ -202,6 +245,8 @@ def _migrate_documents(conn: sqlite3.Connection) -> None:
         "page_count": "ALTER TABLE documents ADD COLUMN page_count INTEGER NOT NULL DEFAULT 0",
         "updated_at": "ALTER TABLE documents ADD COLUMN updated_at TEXT",
         "structure_json": "ALTER TABLE documents ADD COLUMN structure_json TEXT",
+        "library_scope": "ALTER TABLE documents ADD COLUMN library_scope TEXT NOT NULL DEFAULT 'custom'",
+        "is_global": "ALTER TABLE documents ADD COLUMN is_global INTEGER NOT NULL DEFAULT 0",
     }
     for column, statement in migrations.items():
         if column not in existing:

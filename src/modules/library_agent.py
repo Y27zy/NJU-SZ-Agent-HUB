@@ -3,7 +3,7 @@ from collections.abc import Callable
 
 from src.database import execute, fetch_all, fetch_one, now_iso
 from src.agent.reading_agent import ReadingAgent
-from src.rag.simple_vector_store import get_document, get_document_chunks, search_document_chunks
+from src.rag.simple_vector_store import get_library_document, get_document_chunks, search_document_chunks
 
 
 ACTION_PROMPTS = {
@@ -102,7 +102,7 @@ def _section_context(markdown: str, selected_text: str) -> str:
 
 
 def build_reading_context(user_id: int, document_id: int, selected_text: str, mode: str) -> str:
-    document = get_document(user_id, document_id)
+    document = get_library_document(user_id, document_id)
     if not document:
         raise ValueError("资料不存在或无权访问。")
     markdown = document.get("processed_markdown") or document.get("original_text") or ""
@@ -115,7 +115,7 @@ def build_reading_context(user_id: int, document_id: int, selected_text: str, mo
     if mode == "document":
         return markdown[:60000]
     if mode == "rag":
-        matches = search_document_chunks(user_id, document_id, selected_text, top_k=5)
+        matches = search_document_chunks(int(document["user_id"]), document_id, selected_text, top_k=5)
         return "\n\n".join(f"[相关片段 {index}]\n{item['content']}" for index, item in enumerate(matches, 1)) or selected_text
     return selected_text
 
@@ -147,7 +147,7 @@ def ask_about_selection(
     parent_question_id: int | None = None,
     learning_prompt: str = "",
 ) -> dict:
-    document = get_document(user_id, document_id)
+    document = get_library_document(user_id, document_id)
     if not document:
         raise ValueError("资料不存在或无权访问。")
     context = build_reading_context(user_id, document_id, selected_text, context_mode)
@@ -259,7 +259,7 @@ def generate_mindmap(
     cancel_check: Callable[[], bool] | None = None,
     source_text: str = "",
 ) -> str:
-    document = get_document(user_id, document_id)
+    document = get_library_document(user_id, document_id)
     if not document:
         raise ValueError("资料不存在或无权访问。")
     def document_loader(_args: dict) -> dict:

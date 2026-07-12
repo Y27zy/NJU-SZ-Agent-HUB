@@ -16,6 +16,8 @@ DATABASE_URL = os.getenv("DATABASE_URL", "sqlite:///storage/app.db")
 DEFAULT_PROVIDER = os.getenv("DEFAULT_PROVIDER", "")
 DEFAULT_MODEL = os.getenv("DEFAULT_MODEL", "")
 USE_SYSTEM_PROXY = os.getenv("USE_SYSTEM_PROXY", "false").lower() in {"1", "true", "yes", "on"}
+DEFAULT_ADMIN_USERNAME = os.getenv("DEFAULT_ADMIN_USERNAME", "admin").strip()
+DEFAULT_ADMIN_PASSWORD = os.getenv("DEFAULT_ADMIN_PASSWORD", "123456")
 
 
 def get_db_path() -> Path:

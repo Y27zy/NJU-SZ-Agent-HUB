@@ -86,7 +86,7 @@ font-family:"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}
 .collection-title{margin:0;font-size:22px;color:#20232a}.build-button{height:40px;padding:0 18px;border:1px solid #5b2a86;background:#5b2a86;color:white;font-weight:700;cursor:pointer;border-radius:5px}
 .doc-list{display:grid;gap:12px;padding-top:16px}.doc-row{display:grid;grid-template-columns:minmax(0,1fr) auto;align-items:center;gap:20px;padding:18px;border:1px solid #e1e2e6;background:#fcfcfd}
 .doc-row:hover{border-color:#bca8cf;background:#faf7fc}.doc-title{font-size:16px;font-weight:700}.doc-meta{margin-top:7px;color:#777b84;font-size:13px}.doc-actions{display:flex;gap:8px}
-.doc-actions button{height:38px;padding:0 18px;border:1px solid #bca8cf;background:white;color:#5b2a86;font-weight:650;cursor:pointer;border-radius:5px}.doc-actions .study{background:#5b2a86;color:white;border-color:#5b2a86}
+.doc-actions button{height:38px;padding:0 18px;border:1px solid #bca8cf;background:white;color:#5b2a86;font-weight:650;cursor:pointer;border-radius:5px}.doc-actions .study{background:#5b2a86;color:white;border-color:#5b2a86}.doc-actions .danger{border-color:#c76b6b;color:#a93434}.doc-actions .cancel{border-color:#bc861d;color:#805600}
 .doc-row.is-opening{border-color:#5b2a86;background:#f5f0f8}.doc-row.is-opening .study{min-width:92px;opacity:.8}
 .empty-library{padding:90px 20px;text-align:center;color:#777b84}.empty-library strong{display:block;margin-bottom:12px;color:#20232a;font-size:20px}
 @media(max-width:800px){.collection-shell{grid-template-columns:1fr}.collection-side{display:none}.doc-row{grid-template-columns:1fr}.collection-head{align-items:flex-start}}
@@ -95,14 +95,15 @@ COLLECTION_JS = """
 export default function(component){
  const{data,parentElement,setTriggerValue}=component;const root=parentElement.querySelector('#collection-view');
  (parentElement.closest?.('.stApp')||parentElement.getRootNode()?.host?.closest?.('.stApp'))?.classList.remove('workspace-component-ready');
- const cats=data?.categories||[],docs=data?.documents||[],active=data?.active||'custom';
- const signature=JSON.stringify({active,docs:docs.map(d=>[d.id,d.title,d.status,d.pages]),cats:cats.map(c=>[c.key,c.count])});
+ const cats=data?.categories||[],docs=data?.documents||[],active=data?.active||'custom',activeJob=data?.activeJob||null;
+ const signature=JSON.stringify({active,docs:docs.map(d=>[d.id,d.title,d.status,d.pages,d.can_delete,d.can_reprocess]),cats:cats.map(c=>[c.key,c.count]),canAdd:!!data?.canAdd,activeJob:activeJob?.id||''});
  const markup=`<div class="collection-shell"><aside class="collection-side"><button class="back-button" data-command="back">← 返回分类大厅</button><h2 class="side-title">资料库分类</h2>${cats.map(c=>`<button class="category-button ${c.key===active?'is-active':''}" data-category="${c.key}"><span>${c.label}</span><small>${c.count}</small></button>`).join('')}</aside>
- <section class="collection-main"><header class="collection-head"><div><h1 class="collection-title">${data?.title||'自定义资料库'}</h1><div class="doc-meta">${docs.length} 份资料 · 由当前账号维护</div></div><button class="build-button" data-command="add">＋ 构建新资料</button></header>
- ${docs.length?`<div class="doc-list">${docs.map(d=>`<article class="doc-row"><div><div class="doc-title">${d.title}</div><div class="doc-meta">${d.kind} · ${d.status}${d.pages?` · ${d.pages} 页`:''}</div></div><div class="doc-actions"><button data-reprocess="${d.id}" title="使用当前模型重新识别章节和排版">重新整理</button><button data-open="${d.id}" class="study">学习</button></div></article>`).join('')}</div>`:`<div class="empty-library"><strong>这里还没有资料</strong><span>点击“构建新资料”，把 PDF、PPTX 或 Markdown 整理成可交互原文。</span></div>`}</section></div>`;
+ <section class="collection-main"><header class="collection-head"><div><h1 class="collection-title">${data?.title||'自定义资料库'}</h1><div class="doc-meta">${docs.length} 份资料${active==='custom'?' · 由当前账号维护':' · 本地资料与全局资料会同时显示'}</div></div>${data?.canAdd?'<button class="build-button" data-command="add">＋ 构建新资料</button>':''}</header>
+ ${docs.length?`<div class="doc-list">${docs.map(d=>{const busy=activeJob&&Number(activeJob.document_id)===Number(d.id);return `<article class="doc-row"><div><div class="doc-title">${d.title}</div><div class="doc-meta">${d.kind} · ${d.global?'全局同步':'仅自己可见'} · ${busy?'重新整理中':d.status}${d.pages?` · ${d.pages} 页`:''}</div></div><div class="doc-actions">${busy?`<button class="cancel" data-cancel-reprocess="${d.id}">取消重新整理</button>`:(d.can_reprocess?`<button data-reprocess="${d.id}" title="使用当前模型重新识别章节和排版">重新整理</button>`:'')}${d.can_delete?`<button class="danger" data-delete="${d.id}">删除</button>`:''}<button data-open="${d.id}" class="study">学习</button></div></article>`}).join('')}</div>`:`<div class="empty-library"><strong>这里还没有资料</strong><span>${data?.canAdd?'点击“构建新资料”，把 PDF、PPTX 或 Markdown 整理成可交互原文。':'这里由管理员维护，暂时没有公开资料。'}</span></div>`}</section></div>`;
  if(root.__signature!==signature){root.innerHTML=markup;root.__signature=signature}
- const click=e=>{const t=e.target.closest('button');if(!t||t.disabled)return;if(t.dataset.command)setTriggerValue('command',{name:t.dataset.command,nonce:Date.now()});if(t.dataset.category)setTriggerValue('category',{key:t.dataset.category,nonce:Date.now()});if(t.dataset.open){t.disabled=true;t.textContent='正在打开';t.closest('.doc-row')?.classList.add('is-opening');setTriggerValue('open_document',{id:Number(t.dataset.open),nonce:Date.now()})}if(t.dataset.reprocess)setTriggerValue('reprocess_document',{id:Number(t.dataset.reprocess),nonce:Date.now()})};
- root.addEventListener('click',click);return()=>root.removeEventListener('click',click);
+ const pollTimer=activeJob?setInterval(()=>setTriggerValue('reprocess_job',{action:'poll',job_id:activeJob.id,nonce:Date.now()}),1200):null;
+ const click=e=>{const t=e.target.closest('button');if(!t||t.disabled)return;if(t.dataset.command)setTriggerValue('command',{name:t.dataset.command,nonce:Date.now()});if(t.dataset.category)setTriggerValue('category',{key:t.dataset.category,nonce:Date.now()});if(t.dataset.open){t.disabled=true;t.textContent='正在打开';t.closest('.doc-row')?.classList.add('is-opening');setTriggerValue('open_document',{id:Number(t.dataset.open),nonce:Date.now()})}if(t.dataset.reprocess)setTriggerValue('reprocess_document',{id:Number(t.dataset.reprocess),nonce:Date.now()});if(t.dataset.cancelReprocess)setTriggerValue('reprocess_job',{action:'cancel',job_id:activeJob?.id||'',nonce:Date.now()});if(t.dataset.delete&&confirm('确定删除这份资料吗？此操作会删除原文件、索引和你的阅读记录。'))setTriggerValue('delete_document',{id:Number(t.dataset.delete),nonce:Date.now()})};
+ root.addEventListener('click',click);return()=>{root.removeEventListener('click',click);if(pollTimer)clearInterval(pollTimer)};
 }
 """
 
@@ -216,14 +217,16 @@ def render_library_hall(categories: list[dict]):
     return _hall(data={"categories": categories}, height=820, on_open_change=lambda: None).open
 
 
-def render_collection(categories: list[dict], documents: list[dict], active: str, title: str):
+def render_collection(categories: list[dict], documents: list[dict], active: str, title: str, *, can_add: bool, active_job: dict | None):
     result = _collection(
-        data={"categories": categories, "documents": documents, "active": active, "title": title},
+        data={"categories": categories, "documents": documents, "active": active, "title": title, "canAdd": can_add, "activeJob": active_job},
         height=820,
         on_command_change=lambda: None,
         on_category_change=lambda: None,
         on_open_document_change=lambda: None,
         on_reprocess_document_change=lambda: None,
+        on_delete_document_change=lambda: None,
+        on_reprocess_job_change=lambda: None,
     )
     return result
 
@@ -303,6 +306,7 @@ def render_study_workspace(
     user_id: int,
     api_base: str,
     api_token: str,
+    can_edit_document: bool = False,
 ):
     reader_html, sections = _reader_html(markdown_source)
     rendered_nodes = [
@@ -342,6 +346,7 @@ def render_study_workspace(
             "userId": user_id,
             "apiBase": api_base,
             "apiToken": api_token,
+            "canEditDocument": can_edit_document,
         },
         height="content",
         on_command_change=lambda: None,

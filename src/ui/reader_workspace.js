@@ -290,6 +290,7 @@ export default function (component) {
         </select>
         <button class="canvas-tool" data-tool="note">新建笔记</button>
         <button class="canvas-tool" data-command="prompt-settings">上下文与提示词</button>
+        ${data?.canEditDocument ? '<button class="canvas-tool" data-command="edit-document">编辑正文</button>' : ''}
         <button class="canvas-tool" data-tool="mindmap">思维导图</button>
         ${data?.isPaper ? '<button class="canvas-tool" data-tool="paper_summary">5 分钟速读</button>' : ''}
         <button class="canvas-tool closed-node-trigger" data-command="closed-nodes" title="重新打开已关闭的问题">已关闭问题 ${nodes.filter((node) => hiddenNodes.has(`${node.type}-${node.id}`)).length}</button>
@@ -541,7 +542,7 @@ export default function (component) {
     }
     const commandButton = event.target.closest('[data-command]');
     const command = commandButton?.dataset.command;
-    if (command === 'back' || command === 'subscription') {
+    if (command === 'back' || command === 'subscription' || command === 'edit-document') {
       setTriggerValue('command', { name: command, nonce: Date.now() });
       return;
     }

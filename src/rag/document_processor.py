@@ -1,6 +1,8 @@
 import base64
 import json
+import math
 import re
+from collections import Counter
 from collections.abc import Callable
 from pathlib import Path
 
@@ -18,15 +20,16 @@ from src.rag.text_splitter import split_text
 
 ProgressCallback = Callable[[int, int, str], None]
 MAX_STRUCTURE_INPUT = 52000
-MAX_CHAPTER_INPUT = 8500
+MAX_CHAPTER_INPUT = 18000
 
-STRUCTURE_SYSTEM_PROMPT = """你是大学教材与学术论文的结构化编辑。你的任务不是总结内容，而是先恢复整份文档的真实目录结构。
+STRUCTURE_SYSTEM_PROMPT = """你是大学教材与学术论文的结构化编辑。你的任务不是总结内容，而是恢复整份文档的真实目录结构。
 请综合所有分页片段，识别封面、目录、章、节、附录和参考文献，并合并重复页眉页脚。
 只输出一个合法 JSON 对象，不要使用 Markdown 代码围栏。格式必须是：
 {"document_title":"标题","document_kind":"course|paper|other","chapters":[{"title":"章节标题","start_page":1,"end_page":3,"summary":"一句话说明本章内容","key_terms":["术语"]}]}
 要求：chapters 按页码递增；页码范围覆盖正文；章节标题简洁、具体、不得使用“第1部分”这类空泛名称；
 论文优先识别 Abstract、Introduction、Related Work、Method、Experiments、Conclusion、References；
-课件优先依据页内大标题和主题转折划分，不能把每一页机械地当成一章。"""
+课件优先依据页内大标题和主题转折划分，不能把每一页机械地当成一章。
+同一页上的多个目录项或小标题属于章内层级，不能分别输出为多个重叠章节；每个 start_page 只能对应一个章节。"""
 
 CHAPTER_SYSTEM_PROMPT = r"""你是南京大学课程资料的数字化排版编辑。把给定章节恢复成忠于原文、适合网页精读的 Markdown 正文。
 严格要求：
@@ -38,6 +41,16 @@ CHAPTER_SYSTEM_PROMPT = r"""你是南京大学课程资料的数字化排版编�
 6. 保留输入中的 <!-- page:N --> 页码锚点，并把它放在对应页面内容之前。
 7. 无法可靠识别的字符写成 [待核对]，不要凭空猜测。
 只输出 Markdown 正文。"""
+
+COMPLETE_DOCUMENT_SYSTEM_PROMPT = r"""你是文档数字化处理 Agent。输入是一份较短的完整资料，而不是需要扩写的提纲。
+请逐页恢复为忠于原文、适合网页精读的 Markdown，并遵守：
+1. 保留全部有效信息，不总结、不扩写、不补充外部知识。
+2. 目录或总览只保留一次；绝不能在每个主题前重复考试说明、摘要、作者或目录。
+3. 根据原文层级使用 ##、###、#### 标题；同一页可有多个章内标题，不要为了每个目录词复制页面正文。
+4. 保留 <!-- page:N --> 锚点。修复 PDF 断行、项目符号和中英文空格；代码使用带语言标识的代码块。
+5. 表格恢复为 Markdown 表格；数学表达使用 $...$ 或 $$...$$，不用 \(...\) 或 \[...\]。
+6. 图片无法转写时保留简短的 [图：原图说明]，不可臆造图中内容。
+只输出正文 Markdown，不要输出文档一级标题，也不要解释处理过程。"""
 
 
 def _extract_json(text: str) -> dict:
@@ -52,16 +65,89 @@ def _extract_json(text: str) -> dict:
     return json.loads(cleaned)
 
 
+def _normalize_repeated_line(line: str) -> str:
+    """Normalize a line for conservative cross-page boilerplate detection."""
+    return re.sub(r"[\W_]+", "", line, flags=re.UNICODE).lower()
+
+
+def _order_pdf_blocks(blocks: list[tuple], page_width: float) -> list[tuple]:
+    """Restore a practical reading order for both one- and two-column pages."""
+    usable = [block for block in blocks if str(block[4]).strip()]
+    narrow = [block for block in usable if (block[2] - block[0]) < page_width * 0.72]
+    left = [block for block in narrow if (block[0] + block[2]) / 2 < page_width * 0.48]
+    right = [block for block in narrow if (block[0] + block[2]) / 2 > page_width * 0.52]
+    is_two_column = len(left) >= 2 and len(right) >= 2
+    if not is_two_column:
+        return sorted(usable, key=lambda block: (round(block[1], 1), round(block[0], 1)))
+
+    wide = [block for block in usable if block not in narrow]
+    ordered: list[tuple] = []
+    remaining = list(narrow)
+    for separator in sorted(wide, key=lambda block: block[1]):
+        before = [block for block in remaining if block[1] < separator[1]]
+        ordered.extend(sorted((block for block in before if (block[0] + block[2]) / 2 < page_width / 2), key=lambda b: b[1]))
+        ordered.extend(sorted((block for block in before if (block[0] + block[2]) / 2 >= page_width / 2), key=lambda b: b[1]))
+        remaining = [block for block in remaining if block not in before]
+        ordered.append(separator)
+    ordered.extend(sorted((block for block in remaining if (block[0] + block[2]) / 2 < page_width / 2), key=lambda b: b[1]))
+    ordered.extend(sorted((block for block in remaining if (block[0] + block[2]) / 2 >= page_width / 2), key=lambda b: b[1]))
+    return ordered
+
+
+def _remove_repeated_page_noise(pages: list[str]) -> list[str]:
+    """Remove recurring headers/footers after their first meaningful occurrence."""
+    if len(pages) < 3:
+        return pages
+    page_lines = [[line.strip() for line in page.splitlines() if line.strip()] for page in pages]
+    frequencies: Counter[str] = Counter()
+    for lines in page_lines:
+        frequencies.update(set(_normalize_repeated_line(line) for line in lines if 3 <= len(line) <= 100))
+    threshold = max(3, math.ceil(len(pages) * 0.6))
+    repeated = {key for key, count in frequencies.items() if key and count >= threshold}
+    if not repeated:
+        return pages
+    seen: set[str] = set()
+    cleaned: list[str] = []
+    for lines in page_lines:
+        kept = []
+        for line in lines:
+            key = _normalize_repeated_line(line)
+            if key in repeated and key in seen:
+                continue
+            kept.append(line)
+            if key in repeated:
+                seen.add(key)
+        cleaned.append("\n".join(kept))
+    return cleaned
+
+
 def _extract_pdf_pages(path: Path) -> list[str]:
+    """Extract pages with column-aware ordering and conservative boilerplate removal."""
     import fitz
 
     pages: list[str] = []
     with fitz.open(path) as document:
         for page in document:
-            blocks = sorted(page.get_text("blocks"), key=lambda block: (round(block[1], 1), round(block[0], 1)))
+            blocks = _order_pdf_blocks(page.get_text("blocks"), page.rect.width)
             text = "\n".join(str(block[4]).strip() for block in blocks if str(block[4]).strip())
             pages.append(text)
-    return pages
+    return _remove_repeated_page_noise(pages)
+
+
+def _document_profile(pages: list[str], title: str, doc_type: str) -> dict:
+    """Classify the document so the agent can choose an efficient processing route."""
+    joined = "\n".join(pages)
+    lowered = joined[:14000].lower()
+    paper_markers = sum(marker in lowered for marker in ("abstract", "introduction", "related work", "references"))
+    paper = paper_markers >= 2 or doc_type.lower() in {"paper", "论文"}
+    compact = not paper and len(pages) <= 10 and len(joined) <= 18000
+    return {
+        "kind": "paper" if paper else ("course" if doc_type.lower() in {"course", "课程"} else "other"),
+        "strategy": "compact_complete" if compact else "chapter_reconstruction",
+        "page_count": len(pages),
+        "character_count": len(joined),
+        "title": title,
+    }
 
 
 def _ocr_page_with_model(user_id: int, path: Path, page_number: int) -> str:
@@ -131,6 +217,22 @@ def _normalize_structure(data: dict, title: str, page_count: int, doc_type: str)
     chapters.sort(key=lambda item: (item["start_page"], item["end_page"]))
     if not chapters:
         return _fallback_structure(title, page_count, doc_type)
+    # A model may mistake every item on a contents page for a top-level chapter.
+    # Keep one chapter boundary per physical page and make titles unique.
+    unique_starts: dict[int, dict] = {}
+    for chapter in chapters:
+        current = unique_starts.get(chapter["start_page"])
+        if current is None:
+            unique_starts[chapter["start_page"]] = chapter
+        else:
+            current["end_page"] = max(current["end_page"], chapter["end_page"])
+            current["key_terms"] = list(dict.fromkeys(current["key_terms"] + [chapter["title"]] + chapter["key_terms"]))[:10]
+    chapters = list(unique_starts.values())[: max(1, min(page_count, 16))]
+    used_titles: Counter[str] = Counter()
+    for chapter in chapters:
+        used_titles[chapter["title"]] += 1
+        if used_titles[chapter["title"]] > 1:
+            chapter["title"] = f"{chapter['title']}（续）"
     chapters[0]["start_page"] = 1
     for index in range(len(chapters) - 1):
         chapters[index]["end_page"] = max(chapters[index]["start_page"], chapters[index + 1]["start_page"] - 1)
@@ -182,6 +284,61 @@ def _clean_chapter(user_id: int, chapter: dict, pages: list[str], progress_text:
     return f"## {chapter['title']}\n\n{body}".strip()
 
 
+def _clean_complete_document(user_id: int, title: str, pages: list[str]) -> str:
+    """Reconstruct a short complete document in one model call to avoid overlap."""
+    source = "\n\n".join(
+        f"<!-- page:{page_number} -->\n\n{text}" for page_number, text in enumerate(pages, 1)
+    )
+    prompt = f"文档标题：{title}\n总页数：{len(pages)}\n\n完整分页原文：\n{source}"
+    body = chat_with_user_model(user_id, COMPLETE_DOCUMENT_SYSTEM_PROMPT, prompt, temperature=0.03).strip()
+    fenced = re.fullmatch(r"```(?:markdown|md)?\s*(.*?)\s*```", body, flags=re.DOTALL | re.IGNORECASE)
+    if fenced:
+        body = fenced.group(1).strip()
+    body = re.sub(rf"(?i)^#\s+{re.escape(title)}\s*\n+", "", body, count=1).strip()
+    if not re.search(r"(?m)^##\s+", body):
+        body = f"## 正文\n\n{body}"
+    return f"# {title}\n\n{body}".strip()
+
+
+def _deduplicate_markdown(markdown: str) -> str:
+    """Drop exact repeated prose blocks while preserving headings and page anchors."""
+    blocks = re.split(r"\n{2,}", markdown.strip())
+    seen: set[str] = set()
+    output: list[str] = []
+    for block in blocks:
+        normalized = re.sub(r"\s+", "", re.sub(r"<!--.*?-->", "", block)).lower()
+        protected = block.lstrip().startswith(("#", "<!-- page:", "```", "|"))
+        if not protected and len(normalized) >= 30 and normalized in seen:
+            continue
+        output.append(block.strip())
+        if len(normalized) >= 30:
+            seen.add(normalized)
+    result = "\n\n".join(output)
+    result = re.sub(r"\\\((.+?)\\\)", r"$\1$", result, flags=re.DOTALL)
+    result = re.sub(r"\\\[(.+?)\\\]", r"$$\1$$", result, flags=re.DOTALL)
+    return result.strip()
+
+
+def _structure_from_markdown(markdown: str, title: str, page_count: int, doc_type: str) -> dict:
+    """Build navigation metadata from a complete reconstructed Markdown document."""
+    headings = [match.group(1).strip() for match in re.finditer(r"(?m)^##\s+(.+?)\s*$", markdown)]
+    if not headings:
+        headings = ["正文"]
+    # Compact documents are reconstructed as one continuous source. Page ranges are
+    # intentionally not invented from heading positions that the model cannot prove.
+    return {
+        "document_title": title,
+        "document_kind": doc_type,
+        "chapters": [{
+            "title": headings[0],
+            "start_page": 1,
+            "end_page": page_count,
+            "summary": "按完整原文一次性重建，章内标题保留在正文中。",
+            "key_terms": headings[1:10],
+        }],
+    }
+
+
 def _process_pages(
     user_id: int,
     title: str,
@@ -210,10 +367,12 @@ def _process_file(
     title: str,
     doc_type: str,
     progress: ProgressCallback | None,
+    force: bool = False,
+    cancel_check: Callable[[], bool] | None = None,
 ) -> tuple[str, str, int, str]:
     from src.agent.document_processing_agent import DocumentProcessingAgent
 
-    result = DocumentProcessingAgent(user_id, progress=progress).run(path, title, doc_type)
+    result = DocumentProcessingAgent(user_id, progress=progress, cancel_check=cancel_check).run(path, title, doc_type, force=force)
     return result.original_text, result.markdown, result.page_count, result.structure_json
 
 
@@ -224,6 +383,8 @@ def process_document(
     doc_type: str,
     folder_id: int | None = None,
     progress: ProgressCallback | None = None,
+    library_scope: str = "custom",
+    is_global: bool = False,
 ) -> int:
     """Plan the whole document, clean it chapter by chapter, then rebuild its local index."""
     path = Path(file_path)
@@ -234,6 +395,8 @@ def process_document(
         str(path),
         folder_id,
         path.suffix.lower().lstrip("."),
+        library_scope,
+        is_global,
     )
     try:
         original, markdown, page_count, structure_json = _process_file(user_id, path, title, doc_type, progress)
@@ -245,7 +408,12 @@ def process_document(
         raise
 
 
-def reprocess_document(user_id: int, document_id: int, progress: ProgressCallback | None = None) -> int:
+def reprocess_document(
+    user_id: int,
+    document_id: int,
+    progress: ProgressCallback | None = None,
+    cancel_check: Callable[[], bool] | None = None,
+) -> int:
     """Rebuild an existing document in place with the currently selected model."""
     document = get_document(user_id, document_id)
     if not document:
@@ -264,11 +432,25 @@ def reprocess_document(user_id: int, document_id: int, progress: ProgressCallbac
             document["title"],
             document["doc_type"],
             progress,
+            force=True,
+            cancel_check=cancel_check,
         )
         chunks = split_text(markdown, chunk_size=1200, overlap=180)
         finish_document_processing(user_id, document_id, original, markdown, chunks, page_count, structure_json)
         return document_id
     except Exception as exc:
+        from src.agent.document_processing_agent import DocumentProcessingCancelled
+
+        if isinstance(exc, DocumentProcessingCancelled):
+            execute(
+                """
+                UPDATE documents
+                SET processing_status = 'ready', processing_error = ?, updated_at = ?
+                WHERE id = ? AND user_id = ?
+                """,
+                (str(exc), now_iso(), document_id, user_id),
+            )
+            raise
         if document.get("processed_markdown"):
             execute(
                 "UPDATE documents SET processing_status = 'ready', processing_error = ?, updated_at = ? WHERE id = ? AND user_id = ?",

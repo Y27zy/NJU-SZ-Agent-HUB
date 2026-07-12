@@ -6,7 +6,8 @@ from datetime import datetime
 from src.database import execute, fetch_one, now_iso
 
 
-def _hash_password(password: str, salt: bytes | None = None) -> str:
+def hash_password(password: str, salt: bytes | None = None) -> str:
+    """Hash a local password with a random PBKDF2 salt."""
     salt = salt or os.urandom(16)
     digest = hashlib.pbkdf2_hmac("sha256", password.encode("utf-8"), salt, 120_000)
     return f"pbkdf2_sha256${salt.hex()}${digest.hex()}"
@@ -15,7 +16,7 @@ def _hash_password(password: str, salt: bytes | None = None) -> str:
 def _verify_password(password: str, encoded: str) -> bool:
     try:
         _, salt_hex, digest_hex = encoded.split("$", 2)
-        candidate = _hash_password(password, bytes.fromhex(salt_hex)).split("$", 2)[2]
+        candidate = hash_password(password, bytes.fromhex(salt_hex)).split("$", 2)[2]
         return hmac.compare_digest(candidate, digest_hex)
     except ValueError:
         return False
@@ -31,7 +32,7 @@ def register_user(username: str, password: str) -> tuple[bool, str]:
         return False, "用户名已存在。"
     execute(
         "INSERT INTO users (username, password_hash, created_at) VALUES (?, ?, ?)",
-        (username, _hash_password(password), datetime.now().isoformat(timespec="seconds")),
+        (username, hash_password(password), datetime.now().isoformat(timespec="seconds")),
     )
     return True, "注册成功，请登录。"
 
@@ -39,8 +40,32 @@ def register_user(username: str, password: str) -> tuple[bool, str]:
 def login_user(username: str, password: str) -> dict | None:
     row = fetch_one("SELECT * FROM users WHERE username = ?", (username.strip(),))
     if row and _verify_password(password, row["password_hash"]):
-        return {"id": row["id"], "username": row["username"], "created_at": row["created_at"]}
+        return {
+            "id": row["id"],
+            "username": row["username"],
+            "is_admin": bool(row["is_admin"]),
+            "created_at": row["created_at"],
+        }
     return None
+
+
+def is_admin(user_id: int) -> bool:
+    """Return whether a local user may maintain shared library material."""
+    row = fetch_one("SELECT is_admin FROM users WHERE id = ?", (user_id,))
+    return bool(row and row["is_admin"])
+
+
+def get_user_profile(user_id: int) -> dict | None:
+    """Load current identity metadata so renamed/role-migrated accounts refresh in session."""
+    row = fetch_one("SELECT id, username, is_admin, created_at FROM users WHERE id = ?", (user_id,))
+    if not row:
+        return None
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "is_admin": bool(row["is_admin"]),
+        "created_at": row["created_at"],
+    }
 
 
 def set_default_model_config(user_id: int, provider: str, api_base: str, api_key: str, model_name: str) -> int:
