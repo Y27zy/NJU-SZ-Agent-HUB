@@ -94,6 +94,7 @@ def init_db() -> None:
                 priority TEXT NOT NULL DEFAULT 'medium',
                 status TEXT NOT NULL DEFAULT 'open',
                 created_at TEXT NOT NULL,
+                completed_at TEXT,
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
 
@@ -167,10 +168,25 @@ def init_db() -> None:
                 FOREIGN KEY(user_id) REFERENCES users(id),
                 FOREIGN KEY(document_id) REFERENCES documents(id)
             );
+
+            CREATE TABLE IF NOT EXISTS agent_runs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER NOT NULL,
+                agent_name TEXT NOT NULL,
+                task TEXT NOT NULL,
+                constraints_json TEXT,
+                plan_json TEXT,
+                tool_trace_json TEXT,
+                result TEXT,
+                status TEXT NOT NULL DEFAULT 'completed',
+                created_at TEXT NOT NULL,
+                FOREIGN KEY(user_id) REFERENCES users(id)
+            );
             """
         )
         _migrate_documents(conn)
         _migrate_canvas_tables(conn)
+        _migrate_todos(conn)
 
 
 def _migrate_documents(conn: sqlite3.Connection) -> None:
@@ -218,6 +234,9 @@ def _migrate_canvas_tables(conn: sqlite3.Connection) -> None:
             "canvas_width": "INTEGER NOT NULL DEFAULT 520",
             "canvas_height": "INTEGER NOT NULL DEFAULT 520",
             "updated_at": "TEXT",
+            "anchor_start": "INTEGER",
+            "anchor_end": "INTEGER",
+            "parent_question_id": "INTEGER",
         },
         "document_mindmaps": {
             "canvas_x": "INTEGER NOT NULL DEFAULT 48",
@@ -226,12 +245,24 @@ def _migrate_canvas_tables(conn: sqlite3.Connection) -> None:
             "canvas_height": "INTEGER NOT NULL DEFAULT 520",
             "updated_at": "TEXT",
         },
+        "document_highlights": {
+            "anchor_start": "INTEGER",
+            "anchor_end": "INTEGER",
+            "context_prefix": "TEXT",
+            "context_suffix": "TEXT",
+        },
     }
     for table, columns in migrations.items():
         existing = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
         for column, definition in columns.items():
             if column not in existing:
                 conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
+def _migrate_todos(conn: sqlite3.Connection) -> None:
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(todos)").fetchall()}
+    if "completed_at" not in existing:
+        conn.execute("ALTER TABLE todos ADD COLUMN completed_at TEXT")
 
 
 def fetch_all(query: str, params: tuple = ()) -> list[sqlite3.Row]:

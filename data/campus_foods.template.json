@@ -1,0 +1,28 @@
+{
+  "schema_version": 2,
+  "campus": "南京大学苏州校区",
+  "updated_at": null,
+  "refresh_interval_days": 7,
+  "canteen_dishes": [
+    {
+      "id": "canteen_replace_me",
+      "venue": "请填写真实食堂名称",
+      "floor": "请填写楼层",
+      "window": "请填写真实窗口名称",
+      "food_name": "请填写真实菜品名称",
+      "meal_times": ["午餐", "晚餐"],
+      "tastes": ["清淡"],
+      "category": "米饭",
+      "price": 0,
+      "weight": 1,
+      "enabled": false,
+      "origin": "demo_template",
+      "locked": true,
+      "notes": "模板记录默认禁用，核实后再修改并启用。"
+    }
+  ],
+  "restaurants": [],
+  "takeaways": [],
+  "pending_review": [],
+  "sources": []
+}

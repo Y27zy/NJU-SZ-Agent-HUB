@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>AnyReader tutorial review</title>
+<style>
+  body { margin: 0; background: #111; color: #fff; font: 16px sans-serif; }
+  nav { display: flex; gap: 8px; padding: 8px; }
+  button { padding: 8px 12px; }
+  video { display: block; width: 100vw; height: calc(100vh - 56px); background: #000; }
+</style>
+<nav>
+  <button onclick="openPart(1)">P1</button><button onclick="openPart(2)">P2</button>
+  <button onclick="openPart(3)">P3</button><button onclick="openPart(4)">P4</button>
+  <button onclick="openPart(5)">P5</button>
+  <button onclick="video.play()">Play</button><button onclick="video.pause()">Pause</button>
+  <button onclick="seek(0)">0s</button><button onclick="seek(10)">10s</button>
+  <button onclick="seek(20)">20s</button><button onclick="seek(30)">30s</button>
+  <button onclick="seek(40)">40s</button><button onclick="seek(50)">50s</button>
+  <button onclick="seek(60)">60s</button>
+</nav>
+<video id="video" src="p1.mp4" controls></video>
+<script>
+  const video = document.getElementById('video');
+  function openPart(part) { video.src = `p${part}.mp4`; video.play(); }
+  function seek(seconds) { video.currentTime = Math.min(seconds, video.duration || seconds); video.pause(); }
+</script>
+</html>

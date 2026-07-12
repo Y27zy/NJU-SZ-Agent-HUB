@@ -6,6 +6,8 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from src.agent.document_processing_agent import DocumentProcessingAgent
+from src.agent.food_models import FoodDataStore
+from src.agent.todo_planning_agent import TodoPlanningAgent
 from src.auth.auth_service import login_user, register_user, set_default_model_config
 from src.database import execute, init_db
 from src.llm.gateway import build_provider
@@ -19,9 +21,11 @@ from src.modules.library_agent import (
     delete_highlight,
     list_document_questions,
     list_highlights,
+    toggle_highlight,
+    toggle_highlight_anchor,
     update_canvas_node,
 )
-from src.modules.todo_agent import list_subtasks, parse_and_save_todos
+from src.modules.todo_agent import list_subtasks
 from src.rag.simple_vector_store import add_document_to_kb, get_document
 from src.rag.text_splitter import split_text
 
@@ -29,7 +33,7 @@ from src.rag.text_splitter import split_text
 def cleanup_user(user_id: int) -> None:
     for table in [
         "document_highlights", "document_questions", "document_mindmaps", "todo_subtasks", "document_chunks",
-        "documents", "library_folders", "todos", "memory_items", "user_model_configs",
+        "agent_runs", "documents", "library_folders", "todos", "memory_items", "user_model_configs",
     ]:
         execute(f"DELETE FROM {table} WHERE user_id = ?", (user_id,))
     execute("DELETE FROM users WHERE id = ?", (user_id,))
@@ -68,6 +72,15 @@ def main() -> None:
 
         highlight_id = add_highlight(user_id, doc_id, "PCA 保留最大方差方向")
         assert len(list_highlights(user_id, doc_id)) == 1
+        assert toggle_highlight(user_id, doc_id, "PCA 保留最大方差方向") is False
+        assert not list_highlights(user_id, doc_id)
+        assert toggle_highlight(user_id, doc_id, "PCA 保留最大方差方向") is True
+        highlight_id = list_highlights(user_id, doc_id)[0]["id"]
+        added, anchored_id = toggle_highlight_anchor(user_id, doc_id, "重复名称", 12, 16, "前文", "后文")
+        assert added and anchored_id
+        anchored = next(item for item in list_highlights(user_id, doc_id) if item["id"] == anchored_id)
+        assert anchored["anchor_start"] == 12 and anchored["anchor_end"] == 16
+        assert toggle_highlight_anchor(user_id, doc_id, "重复名称", 12, 16)[0] is False
         note_id = add_canvas_note(user_id, doc_id, "测试节点", "公式 $x^2$", "note")
         update_canvas_node(user_id, "question", note_id, x=120, y=80, width=460, height=320, content="修改后的内容")
         note = list_document_questions(user_id, doc_id)[0]
@@ -76,9 +89,21 @@ def main() -> None:
         delete_highlight(user_id, highlight_id)
         assert not list_document_questions(user_id, doc_id) and not list_highlights(user_id, doc_id)
 
-        todos = parse_and_save_todos(user_id, "复习机器学习第 3-6 章；周五提交数据库作业")
+        todos = TodoPlanningAgent(user_id).save_validated_tasks(
+            [{"title": "复习机器学习第 3-6 章", "priority": "high", "subtasks": ["第 3-4 章", "第 5-6 章"]}]
+        )
         assert todos and list_subtasks(user_id, todos[0]["id"])
-        print("Smoke test passed: auth, document agent binding, chapter context, canvas, highlights and todo storage.")
+        assert TodoPlanningAgent(user_id).save_validated_tasks([{"title": "我这周要复习机器学习第 3-6 章"}]) == []
+        TodoPlanningAgent(user_id).save_validated_tasks(
+            [{"title": "提交数据库作业", "deadline": "2026-07-15", "priority": "medium", "subtasks": ["检查 SQL", "提交"]}]
+        )
+        assert TodoPlanningAgent(user_id).list_todos(sort_by="deadline")[0]["title"] == "提交数据库作业"
+        assert TodoPlanningAgent(user_id).list_todos(sort_by="priority")[0]["priority"] == "high"
+        assert TodoPlanningAgent._deadline_rank("周五") < TodoPlanningAgent._deadline_rank("周日")
+        food_data = FoodDataStore().load()
+        assert food_data["schema_version"] == 2
+        assert all(key in food_data for key in ("canteen_dishes", "restaurants", "takeaways", "pending_review"))
+        print("Smoke test passed: auth, agent binding, reading context, canvas, todo tools and food tools.")
     finally:
         cleanup_user(user_id)
 

@@ -1,7 +1,8 @@
 import re
+from collections.abc import Callable
 
 from src.database import execute, fetch_all, fetch_one, now_iso
-from src.llm.gateway import chat_with_user_model
+from src.agent.reading_agent import ReadingAgent
 from src.rag.simple_vector_store import get_document, get_document_chunks, search_document_chunks
 
 
@@ -12,6 +13,12 @@ ACTION_PROMPTS = {
 不要只作比喻；优先给大学课程中可手算、可复现的例子。""",
     "solve": """判断选区是否包含题目。若是题目，先列已知与目标，再逐步推导并在末尾验算；若不是题目，给出它在典型题目中的使用方式。
 不得跳过关键推导，所有公式使用规范 LaTeX。""",
+    "variable": """解释选区中每个关键符号或变量。依次说明：对象类型、取值范围、在当前公式中的作用、与相邻符号的关系。
+若同一符号可能有多种含义，只采用当前上下文能支持的解释。""",
+    "why": """回答“为什么这一步成立”。明确指出使用的定义、定理、假设或变换规则，并逐步检查适用条件。
+若原文省略了中间步骤，补全推导；若条件不足，指出还缺什么。""",
+    "socratic": """使用苏格拉底式辅导，不要直接灌输完整结论。先判断读者当前理解，提出一个最关键且可回答的问题；
+根据资料给出必要提示，并说明回答后下一步应检查什么。一次只推进一个认知台阶。""",
     "question": "回答用户关于选中内容的问题。先直接回答，再用原文证据和必要推导支撑；资料不足时明确说明缺失信息。",
 }
 
@@ -26,6 +33,16 @@ CONTEXT_LABELS = {
 
 def list_folders(user_id: int) -> list[dict]:
     return [dict(row) for row in fetch_all("SELECT * FROM library_folders WHERE user_id = ? ORDER BY name", (user_id,))]
+
+
+def ensure_default_folders(user_id: int) -> list[dict]:
+    """Create the small set of top-level library folders used by the upload dialog."""
+    folders = list_folders(user_id)
+    existing = {str(folder["name"]).strip() for folder in folders if folder.get("parent_id") is None}
+    for name in ("课程资料", "论文研读", "其他资料"):
+        if name not in existing:
+            create_folder(user_id, name)
+    return list_folders(user_id)
 
 
 def create_folder(user_id: int, name: str, parent_id: int | None = None) -> int:
@@ -123,7 +140,13 @@ def ask_about_selection(
     action_type: str,
     context_mode: str,
     custom_question: str = "",
-) -> str:
+    cancel_check: Callable[[], bool] | None = None,
+    *,
+    anchor_start: int | None = None,
+    anchor_end: int | None = None,
+    parent_question_id: int | None = None,
+    learning_prompt: str = "",
+) -> dict:
     document = get_document(user_id, document_id)
     if not document:
         raise ValueError("资料不存在或无权访问。")
@@ -143,29 +166,58 @@ def ask_about_selection(
 ## 具体任务
 {question}
 
+## 读者偏好的讲解方式
+{learning_prompt.strip() or "未设置，使用清晰、循序渐进的大学课程讲解风格。"}
+
 回答约束：
 - 只依据资料与必要的基础知识回答，引用原文时保持原意。
 - 先给读者最需要的结论，再展开推理，避免空泛复述。
 - Markdown 层级从 ### 开始，不要输出一级标题。
 - 行内公式使用 $...$，独立公式使用 $$...$$；不要把 LaTeX 放进代码块。
 - 资料不足时明确指出，不得编造页码、实验结果或定义。"""
-    answer = chat_with_user_model(
-        user_id,
-        "你是南京大学苏州校区学生的学术阅读导师。你严谨、清晰、重视可核对性，擅长把数学和机器学习材料讲到读者真正理解。",
-        prompt,
-        temperature=0.25,
-    )
+    def context_loader(_args: dict) -> dict:
+        return {
+            "title": document["title"],
+            "context_mode": context_mode,
+            "selected_text": selected_text,
+            "content": context,
+        }
+
+    def document_loader(_args: dict) -> dict:
+        markdown = document.get("processed_markdown") or document.get("original_text") or ""
+        return {"title": document["title"], "content": markdown[:60000]}
+
+    answer = ReadingAgent(user_id, document_id, context_loader, document_loader).answer(prompt, context_mode).answer
+    if cancel_check and cancel_check():
+        return answer
     x, y = _next_canvas_position(user_id, document_id)
-    execute(
+    if cancel_check and cancel_check():
+        return answer
+    question_id = execute(
         """
         INSERT INTO document_questions
         (user_id, document_id, action_type, selected_text, context_mode, context_snapshot,
-         answer, canvas_x, canvas_y, updated_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         answer, anchor_start, anchor_end, parent_question_id, canvas_x, canvas_y, updated_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (user_id, document_id, action_type, selected_text, context_mode, context[:12000], answer, x, y, now_iso(), now_iso()),
+        (
+            user_id,
+            document_id,
+            action_type,
+            selected_text,
+            context_mode,
+            context[:12000],
+            answer,
+            anchor_start,
+            anchor_end,
+            parent_question_id,
+            x,
+            y,
+            now_iso(),
+            now_iso(),
+        ),
     )
-    return answer
+    return {"id": question_id, "answer": answer}
 
 
 def list_document_questions(user_id: int, document_id: int) -> list[dict]:
@@ -201,22 +253,22 @@ def add_canvas_note(user_id: int, document_id: int, title: str, content: str, ac
     )
 
 
-def generate_mindmap(user_id: int, document_id: int) -> str:
+def generate_mindmap(
+    user_id: int,
+    document_id: int,
+    cancel_check: Callable[[], bool] | None = None,
+    source_text: str = "",
+) -> str:
     document = get_document(user_id, document_id)
     if not document:
         raise ValueError("资料不存在或无权访问。")
-    context = (document.get("processed_markdown") or "")[:60000]
-    content = chat_with_user_model(
-        user_id,
-        "你负责把大学课程与论文整理成层级严格、可复习的知识地图。",
-        """根据资料生成 Markdown 层级知识地图。
-要求：第一行使用 # 根主题；只使用 ##、###、#### 表示层级；节点必须是短语；
-优先呈现章节关系、核心概念、方法步骤、公式之间的依赖和常见应用；不得增加资料中不存在的分支。
+    def document_loader(_args: dict) -> dict:
+        markdown = document.get("processed_markdown") or document.get("original_text") or ""
+        return {"title": document["title"], "content": (source_text.strip() or markdown)[:60000]}
 
-资料：
-""" + context,
-        temperature=0.15,
-    )
+    content = ReadingAgent(user_id, document_id, document_loader, document_loader).mindmap().answer
+    if cancel_check and cancel_check():
+        return content
     x, y = _next_canvas_position(user_id, document_id)
     execute(
         """
@@ -243,6 +295,67 @@ def add_highlight(user_id: int, document_id: int, selected_text: str, note: str 
         "INSERT INTO document_highlights (user_id, document_id, selected_text, note, color, created_at) VALUES (?, ?, ?, ?, 'yellow', ?)",
         (user_id, document_id, text, note.strip(), now_iso()),
     )
+
+
+def toggle_highlight_anchor(
+    user_id: int,
+    document_id: int,
+    selected_text: str,
+    anchor_start: int,
+    anchor_end: int,
+    context_prefix: str = "",
+    context_suffix: str = "",
+) -> tuple[bool, int | None]:
+    """Toggle one exact rendered-text range instead of guessing by repeated text."""
+    text = selected_text.strip()
+    if not text or anchor_start < 0 or anchor_end <= anchor_start:
+        raise ValueError("请选择有效的原文范围。")
+    existing = fetch_one(
+        """
+        SELECT id FROM document_highlights
+        WHERE user_id = ? AND document_id = ? AND anchor_start = ? AND anchor_end = ?
+        """,
+        (user_id, document_id, anchor_start, anchor_end),
+    )
+    if existing:
+        highlight_id = int(existing["id"])
+        delete_highlight(user_id, highlight_id)
+        return False, highlight_id
+    highlight_id = execute(
+        """
+        INSERT INTO document_highlights
+        (user_id, document_id, selected_text, note, color, anchor_start, anchor_end,
+         context_prefix, context_suffix, created_at)
+        VALUES (?, ?, ?, '', 'yellow', ?, ?, ?, ?, ?)
+        """,
+        (
+            user_id,
+            document_id,
+            text,
+            anchor_start,
+            anchor_end,
+            context_prefix[-120:],
+            context_suffix[:120],
+            now_iso(),
+        ),
+    )
+    return True, highlight_id
+
+
+def toggle_highlight(user_id: int, document_id: int, selected_text: str) -> bool:
+    """Return True when a highlight is added, False when the existing one is removed."""
+    text = selected_text.strip()
+    if not text:
+        raise ValueError("请先划选要标记的原文。")
+    existing = fetch_one(
+        "SELECT id FROM document_highlights WHERE user_id = ? AND document_id = ? AND selected_text = ?",
+        (user_id, document_id, text),
+    )
+    if existing:
+        delete_highlight(user_id, int(existing["id"]))
+        return False
+    add_highlight(user_id, document_id, text)
+    return True
 
 
 def list_highlights(user_id: int, document_id: int) -> list[dict]:

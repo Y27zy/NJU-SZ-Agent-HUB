@@ -2,25 +2,27 @@ from pathlib import Path
 
 import streamlit as st
 
+from src.agent.reading_jobs import cancel_reading_job, discard_reading_job, get_reading_job, start_reading_job
 from src.auth.auth_service import activate_model_config, get_default_model_config, list_model_configs
 from src.modules.library_agent import (
     add_canvas_note,
-    add_highlight,
-    ask_about_selection,
     create_folder,
     delete_canvas_node,
     delete_highlight,
     generate_mindmap,
     list_document_mindmaps,
     list_document_questions,
+    ensure_default_folders,
     list_folders,
     list_highlights,
+    toggle_highlight,
     update_canvas_node,
 )
 from src.modules.paper_agent import summarize_paper
 from src.rag.document_processor import process_document, reprocess_document
 from src.rag.simple_vector_store import get_document, get_document_chunks, list_documents
 from src.ui.library_components import render_collection, render_library_hall, render_study_workspace
+from src.ui.reader_api import ensure_reader_api_server
 from src.utils.file_storage import safe_upload_path
 
 
@@ -38,6 +40,8 @@ ACTION_LABELS = {
     "explain": "解释这一步",
     "example": "给一个例子",
     "solve": "提问与解题",
+    "variable": "变量含义",
+    "why": "为什么",
     "question": "自定义提问",
     "paper_summary": "5 分钟速读",
     "note": "阅读笔记",
@@ -52,11 +56,11 @@ def inject_library_theme(workspace: bool = False) -> None:
         <style>
         .stApp:has(.library-page-marker), .stApp:has(.workspace-page-marker) { background:#fcfcfd !important; }
         .stApp:has(.library-page-marker) .block-container { max-width:1480px !important; padding:0 2.4rem 3rem !important; }
-        .stApp:has(.workspace-page-marker) .block-container { max-width:none !important; padding:0 !important; }
-        .stApp:has(.workspace-page-marker) [data-testid="stMainBlockContainer"] { gap:0 !important; }
-        .stApp:has(.workspace-page-marker) [data-testid="stMainBlockContainer"] > div,
-        .stApp:has(.workspace-page-marker) [data-testid="stVerticalBlock"] { gap:0 !important; }
-        .stApp:has(.workspace-page-marker) .st-key-top_nav { display:none !important; }
+        .stApp.workspace-component-ready:has(.workspace-page-marker) .block-container { max-width:none !important; padding:0 !important; }
+        .stApp.workspace-component-ready:has(.workspace-page-marker) [data-testid="stMainBlockContainer"] { gap:0 !important; }
+        .stApp.workspace-component-ready:has(.workspace-page-marker) [data-testid="stMainBlockContainer"] > div,
+        .stApp.workspace-component-ready:has(.workspace-page-marker) [data-testid="stVerticalBlock"] { gap:0 !important; }
+        .stApp.workspace-component-ready:has(.workspace-page-marker) .st-key-top_nav { display:none !important; }
         .stApp:has(.library-page-marker) .st-key-top_nav { margin-bottom:0 !important; }
         </style>
         """,
@@ -127,29 +131,25 @@ def show_document_builder(user_id: int) -> None:
             format_func=lambda value: {"course": "课程学习", "paper": "论文研读", "other": "其他资料"}[value],
         )
     with right:
-        folders = list_folders(user_id)
+        folders = ensure_default_folders(user_id)
         folder_options = [None, *[folder["id"] for folder in folders]]
         folder_id = st.selectbox(
             "保存到",
             folder_options,
-            format_func=lambda value: "自定义资料库" if value is None else next(folder["name"] for folder in folders if folder["id"] == value),
+            format_func=lambda value: "自定义资料库（根目录）" if value is None else next(folder["name"] for folder in folders if folder["id"] == value),
         )
-    with st.expander("新建文件夹"):
-        folder_name = st.text_input("文件夹名称")
-        if st.button("创建文件夹", disabled=not folder_name.strip(), use_container_width=True):
+    folder_input, folder_action = st.columns([0.78, 0.22], vertical_alignment="bottom")
+    folder_name = folder_input.text_input("新建文件夹", placeholder="例如：机器学习导论")
+    if folder_action.button("创建文件夹", use_container_width=True):
+        if not folder_name.strip():
+            st.warning("请输入文件夹名称。")
+        else:
             create_folder(user_id, folder_name)
             st.rerun()
-    st.markdown("**处理方案**")
-    st.markdown(
-        """
-        <div style="padding:14px 16px;border:1px solid #5d4034;background:#211713;color:#e9ddd6;border-radius:5px">
-        <strong style="color:#e2a58d">AI 结构化原文</strong><br>
-        <span style="color:#a79b94">逐页提取/OCR → 版面与公式清洗 → Markdown → RAG 索引。处理时间与页数、模型速度有关。</span>
-        </div>
-        """,
-        unsafe_allow_html=True,
-    )
-    if st.button("开始构建资料", type="primary", disabled=uploaded is None, use_container_width=True):
+    if st.button("开始构建资料", type="primary", use_container_width=True):
+        if uploaded is None:
+            st.warning("请先选择一个资料文件。")
+            return
         progress = st.progress(0, text="准备解析原文件")
 
         def update_progress(current: int, total: int, message: str) -> None:
@@ -180,6 +180,10 @@ def _event_is_new(name: str, event) -> bool:
     if nonce == st.session_state.get(key):
         return False
     st.session_state[key] = nonce
+    if event.get("reader_scroll") is not None:
+        st.session_state.workspace_reader_scroll = max(0, int(event["reader_scroll"]))
+    if event.get("canvas_scroll") is not None:
+        st.session_state.workspace_canvas_scroll = max(0, int(event["canvas_scroll"]))
     return True
 
 
@@ -281,6 +285,7 @@ def _render_workspace(user_id: int) -> None:
         st.rerun()
     models, current_model = _workspace_models(user_id)
     highlights = list_highlights(user_id, document["id"])
+    reader_api = ensure_reader_api_server()
     result = render_study_workspace(
         title=document["title"],
         markdown_source=_document_markdown(user_id, document),
@@ -291,6 +296,15 @@ def _render_workspace(user_id: int) -> None:
         context_mode=st.session_state.get("workspace_context", "section"),
         is_paper=document["doc_type"] == "paper",
         document_id=document["id"],
+        completed_action=st.session_state.get("workspace_completed_action"),
+        agent_error=st.session_state.get("workspace_agent_error", ""),
+        active_job=st.session_state.get("workspace_reading_job", ""),
+        active_action=st.session_state.get("workspace_reading_action"),
+        reader_scroll=st.session_state.get("workspace_reader_scroll"),
+        canvas_scroll=st.session_state.get("workspace_canvas_scroll"),
+        user_id=user_id,
+        api_base=reader_api["base_url"],
+        api_token=reader_api["token"],
     )
     if _event_is_new("workspace_command", result.command):
         if result.command["name"] == "back":
@@ -312,19 +326,49 @@ def _render_workspace(user_id: int) -> None:
         action = event["action"]
         selected_text = event.get("selected_text", "")
         if action == "highlight":
-            add_highlight(user_id, document["id"], selected_text)
-            st.toast("已保存为本资料重点。")
-            st.rerun()
-        with st.spinner("正在结合原文思考..."):
-            ask_about_selection(
-                user_id,
-                document["id"],
-                selected_text,
-                action,
-                st.session_state.get("workspace_context", "section"),
-                event.get("custom_question", ""),
-            )
+            added = toggle_highlight(user_id, document["id"], selected_text)
+            st.toast("已保存为本资料重点。" if added else "已取消这段原文的标记。")
+            return
+        st.session_state.workspace_agent_error = ""
+        action_nonce = int(event.get("nonce") or 0)
+        job_id = start_reading_job(
+            user_id,
+            document["id"],
+            selected_text,
+            action,
+            st.session_state.get("workspace_context", "section"),
+            event.get("custom_question", ""),
+            action_nonce,
+        )
+        st.session_state.workspace_reading_job = job_id
+        st.session_state.workspace_reading_action = action_nonce
         st.rerun()
+    if _event_is_new("workspace_job", result.job_event):
+        event = result.job_event
+        job_id = str(event.get("job_id") or st.session_state.get("workspace_reading_job") or "")
+        action_nonce = st.session_state.get("workspace_reading_action")
+        if event.get("action") == "cancel":
+            cancel_reading_job(job_id, user_id)
+            st.session_state.workspace_completed_action = action_nonce
+            st.session_state.workspace_agent_error = ""
+            st.session_state.pop("workspace_reading_job", None)
+            st.session_state.pop("workspace_reading_action", None)
+            discard_reading_job(job_id, user_id)
+            st.rerun()
+        job = get_reading_job(job_id, user_id)
+        if not job:
+            st.session_state.workspace_completed_action = action_nonce
+            st.session_state.workspace_agent_error = "阅读任务已失效，请重新划选后提问。"
+            st.session_state.pop("workspace_reading_job", None)
+            st.session_state.pop("workspace_reading_action", None)
+            st.rerun()
+        if job["status"] in {"completed", "cancelled", "failed"}:
+            st.session_state.workspace_completed_action = action_nonce
+            st.session_state.workspace_agent_error = f"生成失败：{job['error']}" if job["status"] == "failed" else ""
+            st.session_state.pop("workspace_reading_job", None)
+            st.session_state.pop("workspace_reading_action", None)
+            discard_reading_job(job_id, user_id)
+            st.rerun()
     if _event_is_new("workspace_tool", result.tool):
         tool = result.tool["name"]
         with st.spinner("正在整理资料结构..."):
@@ -336,30 +380,36 @@ def _render_workspace(user_id: int) -> None:
         st.rerun()
     if _event_is_new("workspace_node", result.node_event):
         event = result.node_event
+        node_type = event.get("node_type")
+        node_id = event.get("id")
+        if node_type not in {"question", "mindmap"} or not node_id:
+            return
         if event["action"] == "delete":
-            delete_canvas_node(user_id, event["node_type"], int(event["id"]))
+            delete_canvas_node(user_id, node_type, int(node_id))
+            return
         elif event["action"] == "save":
             update_canvas_node(
                 user_id,
-                event["node_type"],
-                int(event["id"]),
+                node_type,
+                int(node_id),
                 content=event.get("content", ""),
             )
         elif event["action"] == "layout":
             update_canvas_node(
                 user_id,
-                event["node_type"],
-                int(event["id"]),
+                node_type,
+                int(node_id),
                 x=max(0, int(event.get("x", 0))),
                 y=max(0, int(event.get("y", 0))),
                 width=max(300, int(event.get("width", 520))),
                 height=max(180, int(event.get("height", 520))),
             )
+            return
         st.rerun()
     if _event_is_new("workspace_highlight", result.highlight_event):
         if result.highlight_event["action"] == "delete":
             delete_highlight(user_id, int(result.highlight_event["id"]))
-        st.rerun()
+        return
 
 
 def render_library_page(user_id: int) -> None:
