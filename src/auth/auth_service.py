@@ -1,9 +1,13 @@
 import hashlib
 import hmac
 import os
+import shutil
 from datetime import datetime
+from pathlib import Path
 
-from src.database import execute, fetch_one, now_iso
+from src.config import STORAGE_DIR, UPLOAD_DIR
+from src.database import execute, fetch_all, fetch_one, get_connection, now_iso
+from src.rag.document_assets import document_asset_dir
 
 
 def hash_password(password: str, salt: bytes | None = None) -> str:
@@ -123,3 +127,69 @@ def list_model_configs(user_id: int) -> list[dict]:
     from src.database import fetch_all
 
     return [dict(r) for r in fetch_all("SELECT * FROM user_model_configs WHERE user_id = ? ORDER BY id DESC", (user_id,))]
+
+
+def list_deletable_users(actor_user_id: int) -> list[dict]:
+    """List non-admin accounts that an administrator may permanently remove."""
+    if not is_admin(actor_user_id):
+        return []
+    rows = fetch_all(
+        """
+        SELECT id, username, created_at
+        FROM users
+        WHERE is_admin = 0 AND id != ?
+        ORDER BY created_at DESC, id DESC
+        """,
+        (actor_user_id,),
+    )
+    return [dict(row) for row in rows]
+
+
+def _remove_managed_tree(path: Path, root: Path) -> None:
+    """Delete only generated user data that stays inside an approved storage root."""
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, ValueError) as exc:
+        raise ValueError(f"Refusing to delete unmanaged path: {path}") from exc
+    if path.exists():
+        shutil.rmtree(path)
+
+
+def delete_personal_account(actor_user_id: int, target_user_id: int) -> tuple[bool, str]:
+    """Permanently remove a normal account and all of its private persisted data."""
+    if actor_user_id == target_user_id:
+        return False, "管理员不能注销当前登录账户。"
+    if not is_admin(actor_user_id):
+        return False, "只有管理员可以注销其他账户。"
+
+    with get_connection() as conn:
+        target = conn.execute(
+            "SELECT id, username, is_admin FROM users WHERE id = ?", (target_user_id,)
+        ).fetchone()
+        if not target:
+            return False, "该账户已不存在。"
+        if bool(target["is_admin"]):
+            return False, "管理员账户不能在这里注销。"
+
+        document_ids = [
+            int(row["id"])
+            for row in conn.execute("SELECT id FROM documents WHERE user_id = ?", (target_user_id,)).fetchall()
+        ]
+        if document_ids:
+            marks = ",".join("?" for _ in document_ids)
+            for table in ("document_questions", "document_mindmaps", "document_highlights", "document_chunks"):
+                conn.execute(f"DELETE FROM {table} WHERE document_id IN ({marks})", document_ids)
+
+        conn.execute("DELETE FROM documents WHERE user_id = ?", (target_user_id,))
+        conn.execute("DELETE FROM todo_subtasks WHERE user_id = ?", (target_user_id,))
+        conn.execute("DELETE FROM todos WHERE user_id = ?", (target_user_id,))
+        conn.execute("DELETE FROM memory_items WHERE user_id = ?", (target_user_id,))
+        conn.execute("DELETE FROM agent_runs WHERE user_id = ?", (target_user_id,))
+        conn.execute("DELETE FROM library_folders WHERE user_id = ?", (target_user_id,))
+        conn.execute("DELETE FROM user_model_configs WHERE user_id = ?", (target_user_id,))
+        conn.execute("DELETE FROM users WHERE id = ?", (target_user_id,))
+
+    for document_id in document_ids:
+        _remove_managed_tree(document_asset_dir(document_id), STORAGE_DIR / "document_assets")
+    _remove_managed_tree(UPLOAD_DIR / str(target_user_id), UPLOAD_DIR)
+    return True, f"已永久注销账户 {target['username']}，并清理其个人数据。"

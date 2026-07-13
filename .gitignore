@@ -6,7 +6,11 @@ venv/
 .idea/
 .vscode/
 storage/app.db
+storage/app.db-*
 storage/uploads/*
 !storage/uploads/.gitkeep
+storage/document_assets/
+data/*.tmp
+data/*.corrupt-*.json
 *.log
 tmp/

@@ -3,9 +3,12 @@ from unittest.mock import patch
 
 from src.rag.document_processor import (
     _clean_complete_document,
+    _classify_document_pages,
     _deduplicate_markdown,
     _document_profile,
     _normalize_structure,
+    _remove_non_learning_markdown,
+    _structure_from_page_headings,
     _remove_repeated_page_noise,
 )
 
@@ -64,6 +67,57 @@ class DocumentProcessingTests(unittest.TestCase):
         cleaned = _deduplicate_markdown(markdown)
         self.assertIn("$x + y$", cleaned)
         self.assertIn("$$z = 1$$", cleaned)
+
+    def test_isolated_thank_you_page_is_removed(self) -> None:
+        markdown = "# 标题\n\n<!-- page:1 -->\n\n## 贝叶斯分类器\n\n正文。\n\n<!-- page:2 -->\n\n# Thank You\n\n![致谢页](asset://page-002-figure-1.png)"
+        cleaned = _remove_non_learning_markdown(markdown)
+        self.assertIn("贝叶斯分类器", cleaned)
+        self.assertNotIn("Thank You", cleaned)
+        self.assertNotIn("page-002-figure-1.png", cleaned)
+
+    def test_closing_line_is_removed_but_teaching_page_stays(self) -> None:
+        markdown = "<!-- page:4 -->\n\n## 贝叶斯公式\n\n这是推导正文。\n\n欢迎提问"
+        cleaned = _remove_non_learning_markdown(markdown)
+        self.assertIn("这是推导正文", cleaned)
+        self.assertNotIn("欢迎提问", cleaned)
+
+    def test_front_matter_is_not_sent_to_learning_body(self) -> None:
+        pages = [
+            "微积分 I\n张三 编\n高等教育出版社\nISBN 978-7-0000",
+            "目录\n第一章 函数与极限 ........ 1\n第二章 导数 ........ 25",
+            "第一章 函数与极限\n函数是两个集合之间的对应关系。",
+        ]
+        roles = _classify_document_pages(pages)
+        self.assertEqual(roles[1], "skip")
+        self.assertEqual(roles[2], "outline")
+        self.assertEqual(roles[3], "content")
+
+    def test_page_chapter_headings_create_a_book_scale_plan(self) -> None:
+        pages = [
+            "书名\n出版社",
+            "第1章 极限与连续性\n函数的概念。",
+            "极限的基本性质。",
+            "第2章 导数与微分\n导数的定义。",
+        ]
+        roles = _classify_document_pages(pages)
+        structure = _structure_from_page_headings("微积分", "课程", pages, roles)
+        self.assertIsNotNone(structure)
+        self.assertEqual([item["title"] for item in structure["chapters"]], ["第1章 极限与连续性", "第2章 导数与微分"])
+
+    def test_repeated_running_chapter_header_does_not_split_every_page(self) -> None:
+        pages = [
+            "Chapter 1 Basics\nDefinition one.",
+            "Chapter 1 Basics\nDefinition two.",
+            "Chapter 1 Basics\nDefinition three.",
+            "Chapter 2 Relations\nRelation definition.",
+            "Chapter 2 Exercises Answers\nAnswer key.",
+        ]
+        structure = _structure_from_page_headings(
+            "Discrete Mathematics", "course", pages, {index: "content" for index in range(1, 6)}
+        )
+        self.assertIsNotNone(structure)
+        self.assertEqual([item["title"] for item in structure["chapters"]], ["Chapter 1 Basics", "Chapter 2 Relations"])
+        self.assertEqual(structure["chapters"][0]["end_page"], 3)
 
     @patch("src.rag.document_processor.chat_with_user_model")
     def test_complete_reconstruction_uses_one_call_and_normalizes_wrapper(self, chat) -> None:

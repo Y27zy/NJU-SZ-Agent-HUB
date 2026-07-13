@@ -66,7 +66,7 @@ def save_user_food_preference(
     clean = content.strip()
     if not clean:
         return {"success": False, "status": "invalid", "message": "偏好内容不能为空。"}
-    memory_id = writer(user_id, f"饮食偏好：{clean}", "user", 4)
+    memory_id = writer(user_id, f"饮食偏好：{clean}", "food_preference", 4)
     return {"success": True, "status": "saved", "memory_id": memory_id, "preference": clean}
 
 

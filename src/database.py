@@ -116,9 +116,11 @@ def init_db() -> None:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 user_id INTEGER NOT NULL,
                 memory_type TEXT NOT NULL,
+                memory_key TEXT,
                 content TEXT NOT NULL,
                 importance INTEGER NOT NULL DEFAULT 3,
                 created_at TEXT NOT NULL,
+                updated_at TEXT,
                 last_accessed_at TEXT,
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
@@ -191,6 +193,8 @@ def init_db() -> None:
         _migrate_users(conn)
         _migrate_canvas_tables(conn)
         _migrate_todos(conn)
+        _migrate_memory_items(conn)
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_items_user_key ON memory_items(user_id, memory_key)")
         _ensure_default_admin(conn)
 
 
@@ -308,6 +312,16 @@ def _migrate_todos(conn: sqlite3.Connection) -> None:
     existing = {row["name"] for row in conn.execute("PRAGMA table_info(todos)").fetchall()}
     if "completed_at" not in existing:
         conn.execute("ALTER TABLE todos ADD COLUMN completed_at TEXT")
+
+
+def _migrate_memory_items(conn: sqlite3.Connection) -> None:
+    """Add durable-key fields without invalidating existing local memories."""
+    existing = {row["name"] for row in conn.execute("PRAGMA table_info(memory_items)").fetchall()}
+    if "memory_key" not in existing:
+        conn.execute("ALTER TABLE memory_items ADD COLUMN memory_key TEXT")
+    if "updated_at" not in existing:
+        conn.execute("ALTER TABLE memory_items ADD COLUMN updated_at TEXT")
+    conn.execute("UPDATE memory_items SET updated_at = COALESCE(updated_at, created_at)")
 
 
 def fetch_all(query: str, params: tuple = ()) -> list[sqlite3.Row]:

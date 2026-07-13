@@ -1,287 +1,329 @@
 # NJU-SZ Agent Hub
 
-南京大学苏州校区学生 Agent Hub，是面向学习、科研、时间管理与校园生活的一站式课程项目原型。
+这是一个面向南京大学苏州校区学生的校园 Agent 工作台。
 
-> “NJU-SZ Agent Hub 不是一个单一问答机器人，而是一个面向学生真实场景的多功能 Agent 平台。系统围绕课程学习、科研阅读、时间管理和饮食决策四类高频需求，结合 RAG、工具调用、分层记忆、动态思维树和多模型统一接口，构建一个可扩展的校园个人 AI 助手原型。”
+平台把课程资料、论文阅读、任务安排和“今天吃什么”放在同一个空间里：资料先被整理成可阅读、可检索的正文，问题再由对应的 Agent 调用工具完成。模型负责理解和组织，Python 负责检索、权限、数据筛选与随机选择，结果也因此更容易追溯。
 
-当前版本只调用用户明确配置并选中的真实模型 API，不包含 Mock 回答，也不会在调用失败时静默切换模型。
+> NJU-SZ Agent Hub 是一个面向学生真实场景的多功能 Agent 平台。系统围绕课程学习、科研阅读、时间管理和饮食决策四类高频需求，结合 RAG、工具调用、分层记忆、动态思维树和多模型统一接口，构建一个可扩展的校园个人 AI 助手原型。
 
-## 1. 项目背景
+<!-- 截图建议：在这里放首页全景图，例如 docs/images/home.png -->
 
-课程资料、论文、待办和个人偏好通常分散在不同工具里。本项目把文档处理、交互式阅读、Agent 工具与 RAG 组织到同一个学生工作台中，用于展示一个结构清楚、可以继续扩展的机器学习课程大项目。
+<!-- ![NJU-SZ Agent Hub 首页](docs/images/home.png) -->
 
-## 2. 为什么不是简单聊天机器人
+## 先看它能做什么
 
-- Agent 在资料原文、任务列表和用户偏好等具体场景中工作。
-- 用户可在原文中划选文字，直接执行解释、举例、解题和自由提问。
-- 回答可选择选区、附近段落、章节、整份文档或 RAG 检索作为上下文。
-- 课程资料与论文共用统一资料库，论文仍拥有专用研读工具。
-- 复杂规划使用 Dynamic Thought Tree 生成多个候选计划并评分。
+- **把资料变成阅读空间**：上传 PDF、PPTX、TXT 或 Markdown，自动提取正文、识别章节、清理重复内容并建立检索索引。
+- **在原文旁边学习**：划选一段话后，可以解释、追问、举例、解题、记录笔记或生成思维导图；回答以可移动、可缩放的节点留在画布上。
+- **辅助论文研读**：围绕研究问题、方法、创新点、实验设置、局限、组会汇报和复现清单组织阅读任务。
+- **把一句待办拆成行动**：Todo Agent 识别独立成果、截止时间、优先级和依赖，并生成有顺序的子任务；周计划会比较多个候选方案。
+- **替选择困难做决定**：FoodAgent 理解自然语言或表单限制，再由 Python 从审核过的本地数据中严格筛选并随机选出一个结果。
+- **使用自己的模型**：每个账号可以保存、测试、切换和删除自己的 Qwen、Kimi、DeepSeek、智谱或其他 OpenAI-compatible API 配置。
 
-## 3. 功能模块
+## 一般使用路径
 
-### Agent Runtime 与领域 Agent
+1. 注册并登录，在“订阅”页添加自己的模型 API，先测试连接，再保存为当前模型。
+2. 进入“资料库”，上传一份课件、教材或论文。
+3. DocumentProcessingAgent 提取文字、判断文档类型、恢复章节和公式，必要时执行本地 OCR。
+4. 打开学习画布，沿左侧目录阅读；划选正文后原地提问，或把回答、笔记和思维导图留在右侧画布。
+5. 把复习目标交给 Todo Agent 安排，吃饭时再让 FoodAgent 从本地审核数据中替你做一个明确决定。
 
-项目中的“Agent”不是页面名称或一段角色提示词。`src/agent/runtime.py` 提供统一的轻量执行循环：
+<!-- 截图建议：资料库分类页与阅读画布各放一张 -->
+
+<!-- ![资料库](docs/images/library.png) -->
+
+<!-- ![阅读画布](docs/images/reader-workspace.png) -->
+
+## 系统结构
 
 ```text
-用户目标与限制
-  -> 模型生成工具计划（严格 JSON）
-  -> Runtime 校验工具白名单与调用次数
-  -> 执行 RAG / 数据库 / 偏好记忆 / Dynamic Thought Tree / 可选网络检索
-  -> 模型基于工具证据合成结果
-  -> agent_runs 保存计划、工具轨迹、结果与状态
+┌──────────────────────── Streamlit UI ────────────────────────┐
+│ 首页  资料库/阅读画布  任务规划  美食推荐  订阅与模型  关于 │
+└────────────────────────────┬──────────────────────────────────┘
+                             │
+┌──────────────────────── Agent Layer ─────────────────────────┐
+│ DocumentProcessingAgent   ReadingAgent   PaperResearchAgent  │
+│ TodoPlanningAgent         FoodAgent      ToolUsingAgent      │
+└───────────────┬──────────────────┬──────────────────┬─────────┘
+                │                  │                  │
+       ┌────────▼────────┐ ┌───────▼────────┐ ┌──────▼─────────┐
+       │ RAG & Documents │ │ Memory         │ │ Domain Tools   │
+       │ parse / OCR     │ │ working        │ │ todo / food    │
+       │ clean / assets  │ │ user preference│ │ web evidence   │
+       │ chunks / TF-IDF │ │ knowledge      │ │ thought tree   │
+       └────────┬────────┘ └───────┬────────┘ └──────┬─────────┘
+                └──────────────────┼──────────────────┘
+                                   │
+                         ┌─────────▼─────────┐
+                         │ LLM Gateway       │
+                         │ OpenAI-compatible │
+                         └─────────┬─────────┘
+                                   │
+                    ┌──────────────▼──────────────┐
+                    │ SQLite + local file storage │
+                    └─────────────────────────────┘
 ```
 
-当前领域 Agent 包括：
+## 资料库与阅读画布
 
-- `DocumentProcessingAgent`：抽取、OCR、结构侦察、章节恢复、质量审计与修复。
-- `ReadingAgent`：根据选区、段落、章节、全文或 RAG 工具完成解释、举例、解题和知识地图。
-- `CourseLearningAgent`：检索课程知识库后完成问答、总结和带答案练习题。
-- `PaperResearchAgent`：读取与检索论文，完成速读、方法/实验/贡献分析、术语保护翻译和复现规划。
-- `TodoPlanningAgent`：识别独立成果、截止时间与依赖，把复杂任务拆成有顺序的步骤，支持按截止日期、优先级、创建时间和完成时间排序，并调用 Dynamic Thought Tree 规划。
-- `FoodDataAgent`：每七天检索南京大学苏州校区及周边公开饮食线索，只写入 `pending_review`，人工审核前绝不进入推荐池。
-- `FoodAgent`：理解自然语言并选择食堂、附近堂食或外卖工具；具体对象由 Python 从已审核本地数据中严格筛选和加权随机选出，模型不能编造或代替随机选择。
+资料库是当前学习与研究流程的主入口。它不是简单的上传列表，而是把“文件”变成可以继续加工的学习资料。
 
-账号、数据库、模型配置和文件存储仍然是基础设施服务，而不是强行包装成 Agent。领域 Agent 通过受控工具使用这些能力，这样更容易审计、测试和在课程展示中解释。
+### 文档处理流水线
 
-普通模块仅在需要时启用联网工具。FoodDataAgent 在饮食页面打开且资料超过 7 天时后台刷新，也可手动执行：
+DocumentProcessingAgent 会按文档特征选择处理策略：
+
+1. **提取正文**：PyMuPDF 读取 PDF，python-pptx 读取 PPTX，TXT 与 Markdown 直接解析。
+2. **处理扫描页**：少量稀疏页可交给支持视觉输入的模型；扫描页较多时使用 RapidOCR，避免逐页调用模型。
+3. **识别页面角色**：区分正文、目录/提纲和应跳过的页面，过滤封面、出版信息、致谢、结束语等非学习内容。
+4. **恢复章节**：优先使用 PDF 书签，其次识别正文主标题，最后才由模型规划章节。
+5. **重建 Markdown**：保留定义、推导、公式、表格、例题和实验内容，统一数学公式定界符。
+6. **去重与质检**：清理重复页眉页脚、重复段落和无效结束页；对明确检测到的问题进行定向返修。
+7. **绑定图片**：提取 PDF 图片，只把正文明确保留的图像标记绑定回文档，避免把装饰图和重复幻灯片全部塞进阅读器。
+8. **建立索引**：按块写入 SQLite，问答时通过 TF-IDF 检索相关片段。
+
+长文档处理会在上传文件旁保存缓存。网络短暂中断后重试时，已经完成的 OCR、结构规划和章节结果不需要从头再来。重新整理任务可在页面中取消，取消后保留原版本。
+
+### 阅读画布功能简介
+
+- 左侧章节目录与正文区域可以调整宽度。
+- 正文支持 Markdown、表格、代码块与 KaTeX 数学公式。
+- 划选文字后可执行解释、变量含义、为什么、举例、解题、自定义提问、笔记、重点标记和选区思维导图。
+- 上下文可以选择当前选区、段落、章节、整篇文档或 RAG 相关片段。
+- AI 回答、笔记与思维导图会成为画布节点，可拖动、缩放、编辑、关闭、恢复或永久删除。
+- 对已有回答继续追问时，父回答会折叠，避免画布无限拉长。
+- 标记、问题和节点位置都会保存，下次打开仍能继续。
+- 自定义资料可以由拥有者编辑正文；共享分类中的全局资料由管理员维护。
+
+## RAG：回到资料本身
+
+文档完成处理后会被切成带重叠的文本块，保存到 `document_chunks`。检索时使用 `TfidfVectorizer` 计算查询与文本块的相似度，取最相关片段作为上下文。
+
+```text
+上传文件
+  → 文本/OCR 提取
+  → 结构化 Markdown
+  → 文本切块
+  → SQLite 中的知识块
+  → TF-IDF 检索 Top-K
+  → 连同问题交给 ReadingAgent / Course Agent / Paper Agent
+```
+
+这个实现有意保持轻量：clone 后不需要单独启动向量数据库。`src/rag/simple_vector_store.py` 已经把数据访问与排序接口分开，后续可以把内部实现替换为 FAISS、Chroma 或服务端向量库。
+
+## 三层记忆
+
+项目利用三层记忆，防止把整段聊天历史无差别地塞给模型，而是按用途分层：
+
+| 层级             | 保存什么                                 | 当前用途                                           |
+| ---------------- | ---------------------------------------- | -------------------------------------------------- |
+| Working Memory   | 当前任务、文档、最近输入和最近输出       | 保持一次页面会话中的连续状态                       |
+| User Memory      | 饮食忌口、口味、预算、学习时间与规划偏好 | FoodAgent 和 Todo Agent 在执行前按查询检索相关偏好 |
+| Knowledge Memory | 用户上传资料及其文本块                   | RAG 检索、章节问答和论文分析                       |
+
+长期记忆使用关键词相关性、重要度和时间新鲜度排序；同类饮食偏好会更新而不是无休止追加。它目前主要服务饮食和规划场景，未来可以继续接入阅读讲解风格、常用课程、研究兴趣和跨资料学习记录。
+
+## Todo Agent 与 Dynamic Thought Tree
+
+TodoPlanningAgent 会先读取未完成任务和用户规划偏好，再将自然语言拆成独立成果。写入数据库前还会做一次确定性校验：空标题、无效优先级和重复任务不会直接入库，缺少子任务时会补成“准备、执行、检查”的基本闭环。
+
+任务列表支持智能排序、截止日期、优先级、创建时间和完成时间排序。默认智能排序首先考虑是否完成和截止日期，再考虑优先级。
+
+生成本周计划时会调用轻量 Dynamic Thought Tree：
+
+1. 生成三个策略不同的候选计划；
+2. 按时间结构、优先级、子任务和复盘节点评分；
+3. 选择得分最高的方案；
+4. 由 Todo Agent 整理成最终周计划，而不是把三个冗长候选全部丢给用户。
+
+<!-- 截图建议：放一张含任务拆解和子任务的页面截图 -->
+
+<!-- ![任务规划](docs/images/todo.png) -->
+
+## FoodAgent：模型理解需求，Python 做决定
+
+自然语言输入会先判断用户想在食堂吃、附近堂食还是点外卖，并提取预算、餐次、口味、品类、人数和距离等限制。真正的推荐对象只能由以下 Python 工具从审核数据中选出：
+
+- `choose_canteen_food`
+- `choose_nearby_restaurant`
+- `choose_takeaway`
+
+工具会严格过滤停用记录、会话排除项、预算、餐次、忌口、人数和距离，再根据口味、品类与长期偏好做加权随机。“换一个”会在当前会话排除上一次结果，因此不会立即重复。
+
+正式数据保存在 [data/campus_foods.json](data/campus_foods.json)，结构分为：
+
+```json
+{
+  "schema_version": 2,
+  "campus": "南京大学苏州校区",
+  "canteen_dishes": [],
+  "restaurants": [],
+  "takeaways": [],
+  "pending_review": [],
+  "sources": []
+}
+```
+
+仓库当前包含人工维护的食堂菜品和附近餐厅数据。联网更新只会把公开搜索线索放进 `pending_review`，不会直接进入正式推荐池；管理员审核后才能启用。这样既允许数据持续更新，也不会让一段不可靠的搜索摘要直接变成“今日推荐”。
+
+手动刷新线索：
 
 ```bash
-python scripts/update_food_data.py --username your_username --force
+python scripts/update_food_data.py --username admin --force
 ```
 
-正式数据位于 `data/campus_foods.json`，编辑模板位于 `data/campus_foods.template.json`，更新状态位于 `data/campus_food_update_meta.json`。联网发现只新增待审核线索；人工批准或新增的记录会标记为 `origin=manual`、`locked=true`，周更新不会覆盖。
+<!-- 截图建议：放一张 FoodAgent 给出单一明确结果的截图 -->
 
-### FoodAgent 数据维护
+<!-- ![美食推荐](docs/images/food.png) -->
 
-`campus_foods.json` 使用 schema v2，并把三类正式推荐池分开保存：
+## 模型配置
 
-- `canteen_dishes`：真实食堂、楼层、窗口、菜品、餐次、口味和价格。
-- `restaurants`：真实附近餐厅、区域、推荐菜、人均、步行时间和适用人数。
-- `takeaways`：真实可配送店铺、单品、平台、实付区间和配送时间。
-- `pending_review`：联网发现的名称、来源链接和摘要，不参与推荐。
-
-可以在美食页面的“数据维护（开发）”中手工新增、启停正式记录，或审核/忽略联网线索；也可以参照模板直接编辑 JSON。正式记录必须填写真实名称和具体菜品并设置 `enabled=true`。旧版 `venues/dishes/restaurants` 会在首次读取时自动迁移：具体菜品和餐厅尽量转入正式池，只有地点名称的旧记录保留为待审核线索，原有 `manual/locked` 标记不会丢失。损坏的 JSON 会备份为 `campus_foods.corrupt-时间.json` 后以空数据库启动。
-
-推荐流程为：FoodAgent 提取模式和约束 -> 读取用户饮食记忆 -> 调用一个 `choose_*` Python 工具 -> 严格过滤预算、距离、餐次、忌口和停用记录 -> `random.choices` 从合格记录中选一个 -> 输出一到两句话。没有候选时返回 `no_match`，不会放宽硬条件或凭模型知识补写对象。
-
-- 公开首页与右上角登录/注册，个人模块登录后开放。
-- 订阅与模型：以用户自定义 Qwen、Kimi、DeepSeek、智谱及 OpenAI-compatible API 为主，平台订阅仅展示。
-- 资料库：文件夹、PDF/PPTX/TXT/Markdown 上传、结构化转换、文档索引。
-- 阅读器：原文划选、解释、举例、解题、自由提问、历史记录。
-- 论文研读：速读、研究问题、方法、创新点、局限、组会大纲与复现清单。
-- 思维导图：根据当前文档生成 Markdown 层级导图。
-- Todo Agent、Dynamic Thought Tree、内部用户偏好与美食推荐。
-- 平台体验额度页面：仅展示未来付费模式，不创建订单、不执行支付。
-
-## 4. 系统架构
+所有服务商统一走 OpenAI-compatible Chat Completions：
 
 ```text
-+---------------------- Streamlit UI -----------------------+
-| Public Home | Library Hall | Reader Workspace | Todo | Food | Subscription |
-+-----------------------------+-----------------------------+
-                              |
-              +---------------+----------------+
-              |                                |
-              v                                v
-+---------------------------+      +-------------------------+
-| Document Production       |      | Agent Modules           |
-| Extract -> OCR -> Clean MD |      | Reader/Paper/Todo/Food  |
-+-------------+-------------+      +------------+------------+
-              |                                 |
-              v                                 v
-+---------------------------+      +-------------------------+
-| RAG: chunks + TF-IDF      |<---->| Unified LLM Gateway     |
-+-------------+-------------+      +------------+------------+
-              +-------------------+-------------+
-                                  v
-                        +-------------------+
-                        | SQLite + uploads  |
-                        +-------------------+
+POST {API Base}/chat/completions
 ```
 
-## 5. 技术栈
+已内置 Qwen、Kimi、DeepSeek、智谱、OpenAI-compatible 和 Custom 的配置入口。填写 API Base、API Key 和模型名称后，必须先通过真实连接测试才能保存。网路连接或限流类错误会进行有限重试；配置错误不会盲目重试。
 
-- Python 3.10+、Streamlit、SQLite
-- PyMuPDF、python-pptx、Python Markdown、项目内置 KaTeX 0.16.46
-- requests、python-dotenv
-- scikit-learn `TfidfVectorizer`
-- PBKDF2-SHA256 密码哈希
-- 原生 Streamlit Component 协议实现划词阅读器
+`API Base` 通常填到版本路径，例如 `https://api.example.com/v1`；若填入了完整的 `/chat/completions` 路径，Gateway 也会在保存时自动规范化。
 
-项目不依赖 LangChain，LLM Gateway、Agent 与记忆逻辑均为轻量手写实现。
+> API Key 当前明文保存在本机 SQLite。这适合本地课程演示，不适合直接部署到公开服务器；正式部署应使用密钥管理服务或至少进行应用层加密。
 
-## 6. 目录结构
+## 账号、个人资料与共享资料
 
-```text
-nju-sz-agent-hub/
-├── app.py
-├── README.md
-├── requirements.txt
-├── data/
-├── storage/
-├── scripts/
-└── src/
-    ├── agent/
-    ├── auth/
-    ├── llm/
-    ├── memory/
-    ├── modules/
-    │   └── library_agent.py
-    ├── rag/
-    │   └── document_processor.py
-    └── ui/
-        ├── library_page.py
-        └── components/selection_reader/
+- 普通用户拥有自己的模型、资料、任务、记忆和阅读画布数据。
+- 普通用户可以在各资料分类中添加个人资料，这些修改只属于该账号。
+- 管理员添加到非自定义分类的全局资料会对所有账号可见。
+- 自定义资料正文可由拥有者编辑；全局共享资料只允许管理员编辑。
+- 管理员可以注销普通账号，并清理该账号的资料、模型、待办、记忆、画布数据和上传文件。
+
+首次初始化会根据环境变量创建本地管理员。`.env.example` 中的 `admin / 123456` 只是开发默认值，实际使用前请务必修改。
+
+## 快速开始
+
+需要 Python 3.10 或更高版本。
+
+### 1. 安装依赖
+
+```bash
+pip install -r requirements.txt
 ```
 
-## 7. 快速开始
+### 2. 配置环境变量
 
-```powershell
-cd D:\nju-sz-agent-hub
-D:\miniconda3\envs\IntroML\python.exe -m pip install -r requirements.txt
-D:\miniconda3\envs\IntroML\python.exe scripts\init_db.py
-D:\miniconda3\envs\IntroML\python.exe -m streamlit run app.py --server.port 8502
-```
-
-浏览器打开 `http://localhost:8502`。首页无需登录；进入资料库等个人模块时再登录。
-
-## 8. 环境变量
-
-复制 `.env.example` 为 `.env`：
+复制 `.env.example` 为 `.env`，再按本机环境修改：
 
 ```env
 APP_NAME=NJU-SZ Agent Hub
 DATABASE_URL=sqlite:///storage/app.db
-DEFAULT_PROVIDER=
-DEFAULT_MODEL=
 USE_SYSTEM_PROXY=false
+DEFAULT_ADMIN_USERNAME=admin
+DEFAULT_ADMIN_PASSWORD=请换成新的本地密码
 ```
 
-若模型 API 必须经过系统代理，可设置 `USE_SYSTEM_PROXY=true`。
+每个用户的当前模型保存在数据库中，因此正常使用不需要填写预留的 `DEFAULT_PROVIDER` 和 `DEFAULT_MODEL`。`USE_SYSTEM_PROXY=false` 表示模型请求不读取系统代理环境变量；必须通过系统代理访问 API 时再改为 `true`。
 
-## 9. 配置自己的模型 API
-
-登录后进入“订阅”，在“我的模型”区域选择服务商并填写：
-
-- API Base URL，例如 `https://api.deepseek.com`
-- API Key
-- Model Name，例如 `deepseek-chat`
-
-系统统一调用：
-
-```text
-POST {api_base}/chat/completions
-```
-
-保存前必须通过连接测试。API Key 当前明文保存在本地 SQLite；正式部署必须使用加密存储或密钥管理服务。
-
-## 10. 文档转换流水线
-
-```text
-上传原文件
-  -> DocumentProcessingAgent 取得用户当前默认模型
-  -> PyMuPDF/python-pptx 提取，恢复单栏/双栏阅读顺序并保留分页锚点
-  -> 文字不足的页面调用多模态 OCR
-  -> 文档画像判断短提纲、教程或学术论文
-  -> 短资料整份一次重建；长文档按不重叠主章节重建
-  -> 本地去除重复页眉、重复段落并统一 LaTeX 定界符
-  -> 只对确定发现的问题请求模型返修
-  -> 章节检查点与完整结果缓存支持断点续跑
-  -> 保存原始文本和结构化 Markdown
-  -> chunk 与 TF-IDF 索引
-```
-
-`DocumentProcessingAgent` 位于 `src/agent/document_processing_agent.py`。上传与“重新整理”统一调用该 Agent；它不会写死 Qwen，而是动态使用当前用户在“订阅”页面选中的默认模型。短提纲和普通教程通常只进行一次正文模型调用，避免目录项共享同一页时被逐章重复扩写；双栏论文会先恢复阅读顺序，再按真实主章节处理。扫描 PDF 要求该模型支持 OpenAI-compatible 图片输入。转换遵循“忠于原文、不总结、不补写”的提示词，但 AI 识别仍可能出错，重要公式和数据应对照原 PDF 核验。
-
-### 资料库权限
-
-- 自定义资料库：资料、原文件、索引和个人阅读记录仅本人可见；本人可删除、重新整理和编辑正文。
-- 任意资料分类：普通用户新增的是“仅自己可见”的本地资料，可自行删改；管理员新增的是“全局同步”资料，所有账号都会看到同一份最新内容。
-- 全局同步资料：普通用户只能阅读、提问和标记；只有管理员可以删除、重新整理或编辑正文。管理员的正文修改会同步给全部账号，并重建该资料的检索索引。
-- 重新整理在后台执行。点击“取消重新整理”会在当前模型请求结束后停止后续处理，并保留原有资料版本。
-
-本地课程 Demo 会在初始化数据库时创建管理员：用户名 `admin`，密码 `123456`。管理员资料库只展示全局同步资料；自定义资料库始终归各自用户所有。可在 `.env` 中通过 `DEFAULT_ADMIN_USERNAME` 与 `DEFAULT_ADMIN_PASSWORD` 修改；部署前务必改为私有强密码。
-
-## 11. 交互式阅读与上下文
-
-阅读器把结构化 Markdown 渲染为浏览器 HTML，通过原生文本选区获得划词内容。模型不负责“让文字可选择”，只接收选区和上下文并生成回答。
-
-数学公式统一使用项目本地打包的 KaTeX 渲染，支持行内 `$...$` 与独立 `$$...$$`，不依赖 CDN。Markdown 渲染前会规范化文档处理 Agent 常见的“列表项内缩进表格”，使其恢复为真正的 HTML 表格；公式源码会先被占位保护，因此表格公式中的 `|` 不会被误判为列分隔符。
-
-上下文模式包括仅选区、附近段落、当前章节、文内 RAG 和整份资料。“当前章节”按最近标题到下一同级标题的真实边界截取，不再使用固定字符窗口。问答会保存选区、上下文快照和回答，便于复盘。
-
-学习画布支持多个 AI 回答与思维导图节点。节点可以拖动、缩放、编辑和删除；原文区右边缘可以拖动调整宽度。划词“标记”会持久化到 `document_highlights`，重新打开资料后仍会显示。
-
-## 12. 三层记忆
-
-- Working Memory：当前页面、资料、最近输入输出，保存在 `session_state`。
-- User Memory：解释风格、研究兴趣、饮食偏好等长期偏好。
-- Knowledge Memory：资料 Markdown、chunks、论文和课程外部知识。
-
-分层后，不同生命周期的数据可以分别检索和更新，比简单保存完整聊天记录更可控。
-
-## 13. Dynamic Thought Tree
-
-规划器调用当前模型生成三个不同候选方案，按可执行性、时间结构、优先级和复盘节点轻量评分，再输出最高分方案并保留候选结果。这是课程展示级动态思维树，不是复杂搜索算法。
-
-## 14. 数据库表
-
-- `users`、`user_model_configs`
-- `library_folders`
-- `documents`：原文件、原始文本、Markdown、处理状态、页数
-- `document_chunks`
-- `document_questions`、`document_mindmaps`
-- `todos`、`todo_subtasks`
-- `memory_items`
-- `agent_runs`：领域 Agent 的目标、限制、计划、工具轨迹、结果和执行状态
-
-旧版数据库会在 `init_db()` 时自动补充新列。
-
-## 15. Demo 流程
-
-1. 浏览公开首页，在右上角注册并登录。
-2. 在“订阅”页面添加真实 API，并通过连接测试。
-3. 进入“资料库”，创建文件夹并上传资料。
-4. 等待提取/OCR/Markdown 整理完成。
-5. 在原文中划选片段，选择解释、举例、解题或自由提问。
-6. 切换上下文范围，比较回答差异。
-7. 对论文使用论文研读工具，对任意资料生成思维导图。
-8. 在 Todo 和美食模块体验其他学生场景。
-
-## 16. 测试
-
-```powershell
-D:\miniconda3\envs\IntroML\python.exe scripts\smoke_test.py
-D:\miniconda3\envs\IntroML\python.exe scripts\verify_model_fix.py
-D:\miniconda3\envs\IntroML\python.exe -m compileall app.py src scripts
-D:\miniconda3\envs\IntroML\python.exe -m unittest discover -s tests -v
-```
-
-FoodAgent 测试不会调用真实 API，覆盖三类意图路由、硬过滤、会话排除、周更新隔离、旧数据迁移和无 LLM 快捷筛选。真实模型连接请在“订阅”页面单独测试。
-
-可以用当前账号的默认模型批量评估文档处理效果。脚本会在 `storage/document_benchmarks/` 输出 Markdown、结构 JSON，以及耗时、章节数和重复段落统计：
-
-```powershell
-D:\miniconda3\envs\IntroML\python.exe scripts\evaluate_document_agent.py --username youzy "D:\path\a.pdf" "D:\path\b.pdf"
-```
-
-## 17. 后续扩展与 README 转 PDF
-
-- OCR 任务队列、进度恢复和失败页面重试
-- Markdown 人工校订与原 PDF 双栏对照
-- Embedding + FAISS/Chroma
-- 引用页码、图片与公式位置映射
-- 南大课程公共资料、共享资料与勘误工作流
-- 服务端 API 代理、额度扣减与真实支付
-
-README 可用 Pandoc 导出：
+### 3. 初始化并启动
 
 ```bash
-pandoc README.md -o NJU-SZ-Agent-Hub-README.pdf
+python scripts/init_db.py
+streamlit run app.py
 ```
 
-## 18. 课程项目说明
+默认打开 [http://localhost:8501](http://localhost:8501)。首次使用先登录，再到“订阅”页配置模型。
 
-本项目是机器学习导论课程大项目原型，重点是展示 Agent、RAG、分层记忆、文档处理和统一模型接口的工程组合，不代表商业级产品。校外餐厅 JSON 仍是界面演示候选；校内食堂不使用预置假窗口，完全依赖带来源的联网检索。正式部署还需接入学校菜单或地图 API，并补充密钥加密、权限、隐私、并发任务、成本限制和内容审核。
+如果 8501 已被旧进程占用，可以指定新端口：
+
+```bash
+streamlit run app.py --server.port 8502
+```
+
+## 常用维护命令
+
+```bash
+# 初始化或迁移数据库
+python scripts/init_db.py
+
+# 运行不调用真实模型的核心烟雾测试
+python scripts/smoke_test.py
+
+# 运行单元测试
+python -m unittest discover -s tests -v
+
+# 强制刷新饮食公开线索，只写入待审核区
+python scripts/update_food_data.py --username admin --force
+
+# 重新处理资料库中的文档
+python scripts/reprocess_library.py --help
+
+# 评估某份文档处理结果中的重复块等指标
+python scripts/evaluate_document_agent.py --help
+
+# 清理指定普通账号的个人内容
+python scripts/reset_user_content.py --help
+```
+
+文档处理与真实模型有关，因此相关脚本可能产生 API 调用和费用。单元测试会使用临时数据与替身，不要求联网。
+
+## 数据存放位置
+
+```text
+storage/app.db                 SQLite 主数据库
+storage/uploads/<user_id>/    用户上传的原文件
+storage/document_assets/      从文档提取并绑定的图片
+data/campus_foods.json        审核后的饮食数据与待审核线索
+data/campus_food_update_meta.json  饮食刷新状态
+```
+
+上传文件和数据库默认不提交到 Git。删除或移动 `storage` 前请先自行备份需要保留的个人资料。
+
+## 数据库概览
+
+| 表                              | 作用                                |
+| ------------------------------- | ----------------------------------- |
+| `users`                         | 本地账号与管理员标记                |
+| `user_model_configs`            | 用户模型配置与当前模型              |
+| `documents` / `document_chunks` | 文档元数据、结构化正文和 RAG 文本块 |
+| `library_folders`               | 用户资料文件夹                      |
+| `document_questions`            | AI 回答、笔记、追问关系与画布位置   |
+| `document_mindmaps`             | 思维导图与画布位置                  |
+| `document_highlights`           | 可恢复的精确原文标记                |
+| `todos` / `todo_subtasks`       | 父任务和有顺序的执行步骤            |
+| `memory_items`                  | 长期用户偏好与重要度                |
+| `agent_runs`                    | Agent 计划、工具轨迹和最终结果      |
+
+`init_db()` 会在启动时创建缺失表，并为早期数据库补齐新字段，因此正常升级不需要手写迁移 SQL。
+
+## 项目目录
+
+```text
+nju-sz-agent-hub/
+├── app.py                       # Streamlit 入口与导航
+├── data/                        # 校园饮食数据与示例资料
+├── storage/                     # 本地数据库、上传文件和文档图片
+├── scripts/                     # 初始化、评估、导入和维护脚本
+├── tests/                       # 文档、图片、FoodAgent、记忆、账号和 Gateway 测试
+└── src/
+    ├── agent/                   # Agent runtime 与领域 Agent
+    ├── auth/                    # 注册、登录、模型与账号管理
+    ├── llm/                     # OpenAI-compatible Gateway
+    ├── memory/                  # Working / User Memory
+    ├── modules/                 # 面向 UI 的业务调用接口
+    ├── rag/                     # 解析、OCR、图片、切块和 TF-IDF 检索
+    ├── ui/                      # Streamlit 页面与阅读画布组件
+    └── utils/                   # 文件与 Markdown 工具
+```
+
+## 当前边界
+
+项目已经可以完成端到端演示，但仍保留一些有意为之的本地原型边界：
+
+- SQLite 与本地文件存储适合单机体验，还不适合多实例并发部署。
+- OCR、章节恢复和图片保留质量会不可避免地受原文件排版与所选模型影响，正文编辑功能用于让用户修正结果。
+- “平台订阅”是产品形态展示，没有支付、订单或真实额度系统。
+- 当前服务面向可信本地环境，正式公网部署还需要 CSRF、速率限制、密钥管理、审计和更完整的权限服务。
+
+## 关于这个项目
+
+NJU-SZ Agent Hub 起点是一份课程项目，但本人很希望把他做成一个长期可以上线的平台。当同学们面对一份长课件、一篇论文、挤在一起的截止日期，或者一顿迟迟决定不了的晚饭时，希望这个 Agent 能不能把资料、上下文和工具组织成真正有用的下一步。
+
+这也是仓库继续演进的方向：少一点无依据的万能回答，多一点能被看见、检查和继续编辑的过程。

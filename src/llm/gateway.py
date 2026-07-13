@@ -1,3 +1,5 @@
+import time
+
 from src.auth.auth_service import get_default_model_config
 from src.llm.base import BaseLLMProvider
 from src.llm.providers import (
@@ -27,6 +29,25 @@ PROVIDER_DEFAULTS = {
     "zhipu": {"api_base": "https://open.bigmodel.cn/api/paas/v4", "model_name": "glm-4-flash"},
     "custom": {"api_base": "", "model_name": ""},
 }
+
+_TRANSIENT_MODEL_ERROR_MARKERS = (
+    "无法连接模型服务",
+    "模型请求超时",
+    "connection",
+    "timeout",
+    "temporarily",
+    "http 429",
+    "http 500",
+    "http 502",
+    "http 503",
+    "http 504",
+)
+
+
+def _is_transient_model_error(error: LLMProviderError) -> bool:
+    """Return whether a model failure is appropriate for a short retry."""
+    message = str(error).lower()
+    return any(marker in message for marker in _TRANSIENT_MODEL_ERROR_MARKERS)
 
 
 def build_provider(config: dict | None = None) -> BaseLLMProvider:
@@ -81,8 +102,19 @@ def get_llm_for_user(user_id: int) -> BaseLLMProvider:
 
 
 def chat_with_user_messages(user_id: int, messages: list[dict], temperature: float = 0.7) -> str:
-    """Call the selected real model. Errors remain visible instead of silently changing providers."""
-    return get_llm_for_user(user_id).chat(messages, temperature=temperature)
+    """Call the selected real model with bounded retries for transient network failures."""
+    provider = get_llm_for_user(user_id)
+    last_error: LLMProviderError | None = None
+    for attempt in range(3):
+        try:
+            return provider.chat(messages, temperature=temperature)
+        except LLMProviderError as exc:
+            last_error = exc
+            if not _is_transient_model_error(exc) or attempt == 2:
+                raise
+            # Long document processing can survive a short network or rate-limit blip.
+            time.sleep(2 ** attempt)
+    raise last_error or LLMProviderError("模型调用失败。")
 
 
 def chat_with_user_model(user_id: int, system_prompt: str, user_prompt: str, temperature: float = 0.7) -> str:

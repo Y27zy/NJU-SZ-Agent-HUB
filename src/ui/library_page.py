@@ -21,6 +21,7 @@ from src.modules.library_agent import (
 )
 from src.modules.paper_agent import summarize_paper
 from src.rag.document_processor import process_document
+from src.rag.document_assets import ensure_document_images
 from src.rag.simple_vector_store import (
     delete_library_document,
     can_edit_library_document,
@@ -28,6 +29,7 @@ from src.rag.simple_vector_store import (
     get_document_chunks,
     list_library_documents,
     update_document_markdown,
+    update_document_assets_markdown,
 )
 from src.config import UPLOAD_DIR
 from src.ui.library_components import render_collection, render_library_hall, render_study_workspace
@@ -420,9 +422,15 @@ def _render_workspace(user_id: int) -> None:
     models, current_model = _workspace_models(user_id)
     highlights = list_highlights(user_id, document["id"])
     reader_api = ensure_reader_api_server()
+    markdown_source = _document_markdown(user_id, document)
+    refreshed_markdown = ensure_document_images(document["id"], document.get("file_path") or "", markdown_source)
+    if refreshed_markdown != markdown_source:
+        update_document_assets_markdown(document["id"], refreshed_markdown)
+        document["processed_markdown"] = refreshed_markdown
+        markdown_source = refreshed_markdown
     result = render_study_workspace(
         title=document["title"],
-        markdown_source=_document_markdown(user_id, document),
+        markdown_source=markdown_source,
         models=models,
         current_model=current_model,
         nodes=_workspace_nodes(user_id, document["id"]),
@@ -439,6 +447,7 @@ def _render_workspace(user_id: int) -> None:
         user_id=user_id,
         api_base=reader_api["base_url"],
         api_token=reader_api["token"],
+        asset_base_url=f"{reader_api['base_url']}/assets/{document['id']}/?token={reader_api['token']}&user_id={user_id}",
         can_edit_document=can_edit_document,
     )
     if _event_is_new("workspace_command", result.command):

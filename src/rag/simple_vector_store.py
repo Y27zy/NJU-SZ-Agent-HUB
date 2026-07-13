@@ -124,6 +124,16 @@ def fail_document_processing(user_id: int, document_id: int, error: str) -> None
     )
 
 
+def update_document_assets_markdown(document_id: int, markdown: str) -> bool:
+    """Persist a system-generated asset binding without changing document ownership."""
+    with get_connection() as conn:
+        cursor = conn.execute(
+            "UPDATE documents SET processed_markdown = ?, updated_at = ? WHERE id = ?",
+            (markdown, now_iso(), document_id),
+        )
+        return cursor.rowcount > 0
+
+
 def get_document(user_id: int, document_id: int) -> dict | None:
     row = fetch_one("SELECT * FROM documents WHERE id = ? AND user_id = ?", (document_id, user_id))
     return dict(row) if row else None

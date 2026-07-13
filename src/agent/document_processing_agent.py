@@ -4,6 +4,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from collections.abc import Callable
 
+import numpy as np
+
 from src.auth.auth_service import get_default_model_config
 from src.llm.gateway import chat_with_user_model
 from src.llm.providers import LLMProviderError
@@ -40,7 +42,7 @@ class DocumentProcessingCancelled(RuntimeError):
 class DocumentProcessingAgent:
     """Agent that plans, reconstructs, audits, and repairs one complete document."""
 
-    VERSION = "3.0"
+    VERSION = "3.3"
 
     def __init__(self, user_id: int, progress=None, cancel_check: Callable[[], bool] | None = None):
         self.user_id = user_id
@@ -93,16 +95,45 @@ class DocumentProcessingAgent:
 
         if path.suffix.lower() == ".pdf":
             pages = _extract_pdf_pages(path)
-            for index, text in enumerate(pages):
-                if len(text.replace(" ", "")) < 12:
+            sparse_indexes = [index for index, text in enumerate(pages) if len(text.replace(" ", "")) < 12]
+            if len(sparse_indexes) > 8:
+                pages = self._local_ocr_pages(path, pages, sparse_indexes)
+            else:
+                for index in sparse_indexes:
                     self._notify(index + 1, len(pages), f"第 {index + 1} 页文本过少，正在调用视觉识别")
                     try:
                         pages[index] = _ocr_page_with_model(self.user_id, path, index + 1)
                     except LLMProviderError:
-                        pages[index] = text or "[该页没有可提取文本，当前模型不支持视觉识别]"
+                        pages[index] = pages[index] or "[该页没有可提取文本，当前模型不支持视觉识别]"
             return pages
         raw_text = parse_document(path)
         return split_text(raw_text, chunk_size=6500, overlap=0) or [raw_text]
+
+    def _local_ocr_pages(self, path: Path, pages: list[str], sparse_indexes: list[int]) -> list[str]:
+        """Run one local OCR engine for scan-heavy PDFs instead of hundreds of LLM calls."""
+        try:
+            from rapidocr_onnxruntime import RapidOCR
+            import fitz
+        except ImportError as exc:
+            raise ValueError(
+                "该 PDF 主要由扫描页构成，需要本地 OCR。请安装 rapidocr_onnxruntime 后重新整理。"
+            ) from exc
+
+        self._notify(0, len(sparse_indexes), f"检测到 {len(sparse_indexes)} 个扫描页，正在使用本地 OCR")
+        engine = RapidOCR()
+        with fitz.open(path) as document:
+            for current, index in enumerate(sparse_indexes, 1):
+                self._raise_if_cancelled()
+                page = document[index]
+                pixmap = page.get_pixmap(matrix=fitz.Matrix(1.6, 1.6), alpha=False)
+                channels = 3 if pixmap.n >= 3 else 1
+                image = np.frombuffer(pixmap.samples, dtype=np.uint8).reshape(pixmap.height, pixmap.width, pixmap.n)[..., :channels]
+                result, _ = engine(image)
+                if result:
+                    ordered = sorted(result, key=lambda item: (min(point[1] for point in item[0]), min(point[0] for point in item[0])))
+                    pages[index] = "\n".join(str(item[1]).strip() for item in ordered if str(item[1]).strip())
+                self._notify(current, len(sparse_indexes), f"本地 OCR：第 {index + 1} 页")
+        return pages
 
     @staticmethod
     def _extract_json(text: str) -> dict:
@@ -220,26 +251,42 @@ class DocumentProcessingAgent:
         from src.rag.document_processor import (
             _clean_chapter,
             _clean_complete_document,
+            _classify_document_pages,
             _deduplicate_markdown,
             _document_profile,
             _plan_structure,
+            _remove_non_learning_markdown,
+            _structure_from_page_headings,
+            _structure_from_pdf_bookmarks,
             _structure_from_markdown,
         )
+        from src.rag.document_assets import inspect_pdf_figures
 
         source_path = Path(path)
         self._raise_if_cancelled()
-        cache = {} if force else self._load_cache(source_path)
+        cache = self._load_cache(source_path)
         cached_result = self._cached_result(cache)
-        if cached_result:
+        if cached_result and not force:
             self._notify(5, 5, "已读取同一文件与模型的完整处理结果")
             return cached_result
         self._notify(0, 5, f"文档处理 Agent 已启动：{self.model_name}")
-        pages = self._load_pages(source_path)
+        cached_pages = cache.get("pages")
+        if isinstance(cached_pages, list) and cached_pages:
+            pages = [str(page) for page in cached_pages]
+            self._notify(0, 5, "已恢复已完成的文本提取与 OCR 结果")
+        else:
+            pages = self._load_pages(source_path)
+            # OCR is the most expensive local stage for scanned textbooks.  Keep
+            # its result so a later model-network retry does not repeat it.
+            cache["pages"] = pages
+            self._save_cache(source_path, cache)
         self._raise_if_cancelled()
         if not pages:
             raise ValueError("文档没有可处理的正文。")
 
         profile = _document_profile(pages, title, doc_type)
+        figure_hints = inspect_pdf_figures(source_path)
+        page_roles = _classify_document_pages(pages)
         cache["profile"] = profile
         self._notify(1, 5, f"文档画像完成，采用 {profile['strategy']} 策略")
 
@@ -247,16 +294,28 @@ class DocumentProcessingAgent:
             markdown = cache.get("complete_markdown")
             if not markdown:
                 self._notify(2, 5, "正在一次性恢复完整短文档，避免章节重叠")
-                markdown = _clean_complete_document(self.user_id, title, pages)
+                markdown = _clean_complete_document(self.user_id, title, pages, figure_hints, page_roles)
                 self._raise_if_cancelled()
                 cache["complete_markdown"] = markdown
                 self._save_cache(source_path, cache)
             structure = _structure_from_markdown(markdown, title, len(pages), doc_type)
         else:
-            self._notify(1, 5, "正在通读分页内容并规划真实主章节")
+            self._notify(1, 5, "正在读取教材书签与章节标题，规划真实主章节")
             structure = cache.get("structure")
             if not structure:
-                structure = _plan_structure(self.user_id, title, doc_type, pages)
+                structure = _structure_from_pdf_bookmarks(source_path, title, doc_type, pages, page_roles)
+                if structure:
+                    cache["planning_source"] = "pdf_bookmarks"
+                    self._notify(1, 5, "已从 PDF 书签恢复章节，跳过整书目录猜测")
+                else:
+                    structure = _structure_from_page_headings(title, doc_type, pages, page_roles)
+                    if structure:
+                        cache["planning_source"] = "page_headings"
+                        self._notify(1, 5, "已从正文主标题恢复章节，跳过整书目录猜测")
+                if not structure:
+                    self._notify(1, 5, "未找到可靠书签，正在由 Agent 规划主章节")
+                    structure = _plan_structure(self.user_id, title, doc_type, pages, page_roles)
+                    cache["planning_source"] = "agent_planning"
                 self._raise_if_cancelled()
                 cache["structure"] = structure
                 cache["chapters"] = {}
@@ -270,14 +329,21 @@ class DocumentProcessingAgent:
                     self._notify(index, len(chapters), f"读取已完成章节 {index}/{len(chapters)}：{chapter['title']}")
                 else:
                     self._notify(index, len(chapters), f"重建主章节 {index}/{len(chapters)}：{chapter['title']}")
-                    chapter_markdown = _clean_chapter(self.user_id, chapter, pages, chapter["title"])
+                    chapter_markdown = _clean_chapter(
+                        self.user_id,
+                        chapter,
+                        pages,
+                        chapter["title"],
+                        figure_hints,
+                        page_roles,
+                    )
                     self._raise_if_cancelled()
                     cache.setdefault("chapters", {})[cache_key] = chapter_markdown
                     self._save_cache(source_path, cache)
                 markdown_sections.append(chapter_markdown)
             markdown = "\n\n".join(markdown_sections)
 
-        markdown = _deduplicate_markdown(markdown)
+        markdown = _remove_non_learning_markdown(_deduplicate_markdown(markdown))
 
         self._notify(4, 5, "正在执行本地完整性、重复内容与公式定界检查")
         issues = self._local_issues(markdown, structure)
@@ -287,7 +353,7 @@ class DocumentProcessingAgent:
         if issues:
             markdown = self._repair(markdown, issues)
             self._raise_if_cancelled()
-            markdown = _deduplicate_markdown(markdown)
+            markdown = _remove_non_learning_markdown(_deduplicate_markdown(markdown))
 
         structure["processing"] = {
             "agent": "DocumentProcessingAgent",
@@ -296,6 +362,10 @@ class DocumentProcessingAgent:
             "strategy": profile["strategy"],
             "character_count": profile["character_count"],
             "audit_issue_count": len(issues),
+            "learning_page_count": sum(role == "content" for role in page_roles.values()),
+            "outline_page_count": sum(role == "outline" for role in page_roles.values()),
+            "skipped_page_count": sum(role == "skip" for role in page_roles.values()),
+            "structure_source": cache.get("planning_source", "cached"),
         }
         original = "\n\n".join(f"[PAGE {index}]\n{text}" for index, text in enumerate(pages, 1))
         self._notify(5, 5, "章节化文档已通过处理流水线")

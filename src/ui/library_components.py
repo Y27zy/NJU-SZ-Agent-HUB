@@ -2,6 +2,7 @@ import base64
 import html as html_lib
 import re
 from pathlib import Path
+from urllib.parse import quote
 
 import markdown
 import streamlit as st
@@ -131,7 +132,7 @@ WORKSPACE_CSS = KATEX_CSS + """
 #study-reader{height:100vh;overflow:auto;padding:30px clamp(30px,4vw,56px) 100px;background:#fff;line-height:1.82;font-size:16px}
 #study-reader h1{margin:0 0 24px;font-size:30px}#study-reader h2{margin:28px 0 12px;font-size:22px}#study-reader h3{margin:22px 0 10px;font-size:18px}#study-reader p{margin:0 0 1.05em}
 #study-reader blockquote{margin:16px 0;padding:14px 16px;border-left:3px solid #147d75;background:#eef8f6;color:#3b4c49}#study-reader pre{overflow:auto;padding:12px;background:#f5f2f7}#study-reader code{font-family:Consolas,monospace}
-#study-reader table{width:100%;border-collapse:collapse}#study-reader th,#study-reader td{padding:8px;border:1px solid #d7d8dc}#study-reader img{max-width:100%;border-radius:6px}#study-reader ::selection{background:#5b2a86;color:white}#study-reader::highlight(nju-reader-marks){background:#ffe58a;color:inherit;text-decoration:underline;text-decoration-color:#e7b93f;text-decoration-thickness:2px}
+#study-reader table{width:100%;border-collapse:collapse}#study-reader th,#study-reader td{padding:8px;border:1px solid #d7d8dc}#study-reader img{display:block;max-width:100%;height:auto;margin:18px 0;border:1px solid #e1e2e6;border-radius:6px;background:#f8f9fb}#study-reader ::selection{background:#5b2a86;color:white}#study-reader::highlight(nju-reader-marks){background:#ffe58a;color:inherit;text-decoration:underline;text-decoration-color:#e7b93f;text-decoration-thickness:2px}
 .math-block{display:block;max-width:100%;margin:14px 0;text-align:center;overflow-x:auto}.math-inline{display:inline}.katex-error{color:#b94b3c;font-family:Consolas,monospace}
 #sidebar-resizer,#reader-resizer{height:100vh;background:#ddd5e5;cursor:col-resize;transition:background .15s}#sidebar-resizer:hover,#reader-resizer:hover,#sidebar-resizer.is-dragging,#reader-resizer.is-dragging{background:#5b2a86}
 #study-canvas{position:relative;height:100vh;overflow:hidden;background-color:#f7f5f9;background-image:linear-gradient(#e5ddeb 1px,transparent 1px),linear-gradient(90deg,#e5ddeb 1px,transparent 1px);background-size:24px 24px}
@@ -231,7 +232,19 @@ def render_collection(categories: list[dict], documents: list[dict], active: str
     return result
 
 
-def _markdown_with_math(source: str) -> str:
+def _resolve_document_asset_urls(source: str, asset_base_url: str = "") -> str:
+    """Resolve internal PDF-asset references only when rendering the reader."""
+    if not asset_base_url:
+        return source
+
+    def replace(match: re.Match[str]) -> str:
+        separator = "&" if "?" in asset_base_url else "?"
+        return f"{asset_base_url}{separator}name={quote(match.group(1), safe='')}"
+
+    return re.sub(r"asset://([^\s)]+)", replace, source or "")
+
+
+def _markdown_with_math(source: str, asset_base_url: str = "") -> str:
     math_tokens: dict[str, str] = {}
 
     def replace_math(match: re.Match, display: str) -> str:
@@ -241,7 +254,7 @@ def _markdown_with_math(source: str) -> str:
         math_tokens[token] = f'<span class="{class_name}" data-display="{display}">{html_lib.escape(expression)}</span>'
         return token
 
-    normalized = _normalize_markdown_tables(source or "")
+    normalized = _normalize_markdown_tables(_resolve_document_asset_urls(source or "", asset_base_url))
     protected = re.sub(r"\$\$(.+?)\$\$", lambda match: replace_math(match, "block"), normalized, flags=re.DOTALL)
     protected = re.sub(r"(?<!\\)\$(?!\$)(.+?)(?<!\\)\$", lambda match: replace_math(match, "inline"), protected, flags=re.DOTALL)
     rendered = markdown.markdown(
@@ -274,8 +287,8 @@ def _normalize_markdown_tables(source: str) -> str:
     return "\n".join(output)
 
 
-def _reader_html(source: str) -> tuple[str, list[dict]]:
-    rendered = _markdown_with_math(source)
+def _reader_html(source: str, asset_base_url: str = "") -> tuple[str, list[dict]]:
+    rendered = _markdown_with_math(source, asset_base_url)
     sections = []
     for level, section_id, label in re.findall(r'<h([1-3]) id="([^"]+)">(.*?)</h\1>', rendered, flags=re.DOTALL):
         clean_label = re.sub(r"<[^>]+>", "", label)
@@ -306,13 +319,14 @@ def render_study_workspace(
     user_id: int,
     api_base: str,
     api_token: str,
+    asset_base_url: str = "",
     can_edit_document: bool = False,
 ):
-    reader_html, sections = _reader_html(markdown_source)
+    reader_html, sections = _reader_html(markdown_source, asset_base_url)
     rendered_nodes = [
         {
             **node,
-            "html": _markdown_with_math(node.get("content") or ""),
+            "html": _markdown_with_math(node.get("content") or "", asset_base_url),
         }
         for node in nodes
     ]

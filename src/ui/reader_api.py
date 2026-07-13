@@ -5,6 +5,8 @@ import json
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from mimetypes import guess_type
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from src.agent.reading_jobs import (
@@ -16,6 +18,8 @@ from src.agent.reading_jobs import (
 )
 from src.auth.auth_service import activate_model_config
 from src.config import get_db_path
+from src.rag.document_assets import document_asset_dir
+from src.rag.simple_vector_store import get_library_document
 from src.modules.library_agent import (
     add_canvas_note,
     delete_canvas_node,
@@ -131,6 +135,28 @@ class ReaderApiHandler(BaseHTTPRequestHandler):
         self._json(403, {"ok": False, "error": "Reader API token 无效。"})
         return False
 
+    def _asset_authorized(self, query: dict[str, list[str]]) -> bool:
+        return query.get("token", [""])[0] == _token()
+
+    def _asset(self, document_id: int, filename: str, user_id: int) -> None:
+        document = get_library_document(user_id, document_id)
+        if not document:
+            self._json(404, {"ok": False, "error": "资料不存在或无权访问。"})
+            return
+        root = document_asset_dir(document_id).resolve()
+        candidate = (root / Path(filename).name).resolve()
+        if not candidate.is_file() or not candidate.is_relative_to(root):
+            self._json(404, {"ok": False, "error": "图片资源不存在。"})
+            return
+        body = candidate.read_bytes()
+        self.send_response(200)
+        self._cors()
+        self.send_header("Content-Type", guess_type(candidate.name)[0] or "application/octet-stream")
+        self.send_header("Content-Length", str(len(body)))
+        self.send_header("Cache-Control", "private, max-age=3600")
+        self.end_headers()
+        self.wfile.write(body)
+
     def _body(self) -> dict:
         length = int(self.headers.get("Content-Length") or 0)
         if not length:
@@ -147,10 +173,26 @@ class ReaderApiHandler(BaseHTTPRequestHandler):
         if parsed.path == "/health":
             self._json(200, {"ok": True})
             return
+        query = parse_qs(parsed.query)
+        if parsed.path.startswith("/assets/"):
+            if not self._asset_authorized(query):
+                self._json(403, {"ok": False, "error": "图片资源令牌无效。"})
+                return
+            try:
+                parts = parsed.path.strip("/").split("/")
+                if len(parts) != 2 or parts[0] != "assets":
+                    raise ValueError("无效的图片资源路径。")
+                document_id_text = parts[1]
+                filename = query.get("name", [""])[0]
+                if not filename:
+                    raise ValueError("缺少图片资源名称。")
+                self._asset(int(document_id_text), filename, int(query.get("user_id", [0])[0]))
+            except (TypeError, ValueError):
+                self._json(400, {"ok": False, "error": "无效的图片资源路径。"})
+            return
         if not self._authorized():
             return
         try:
-            query = parse_qs(parsed.query)
             user_id = int(query.get("user_id", [0])[0])
             document_id = int(query.get("document_id", [0])[0])
             if parsed.path == "/state":
