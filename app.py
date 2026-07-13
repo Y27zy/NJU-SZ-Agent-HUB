@@ -27,7 +27,7 @@ PUBLIC_PAGES = {"首页", "关于"}
 def render_top_navigation() -> str:
     user = st.session_state.user
     with st.container(key="top_nav"):
-        brand, navigation, account = st.columns([0.24, 0.58, 0.18], vertical_alignment="center")
+        brand, navigation, account = st.columns([0.29, 0.55, 0.16], vertical_alignment="center")
         with brand:
             st.markdown(
                 '<div class="brand-lockup"><span class="brand-mark">N</span><span><div class="brand-name">NJU-SZ Agent Hub</div><div class="brand-sub">南京大学苏州校区</div></span></div>',
@@ -47,7 +47,7 @@ def render_top_navigation() -> str:
                     st.caption("管理员账户" if user.get("is_admin") else "个人账号")
                     if st.button("退出登录", use_container_width=True):
                         logout()
-            elif st.button("登录 / 注册", type="primary", use_container_width=True):
+            elif st.button("登录", type="secondary", use_container_width=True, help="登录已有账户或注册新账户"):
                 show_auth_dialog()
     st.session_state.active_page = page
     return page

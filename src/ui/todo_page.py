@@ -29,7 +29,7 @@ def _inject_todo_theme() -> None:
     st.markdown(
         """
         <style>
-        .stApp:has(.todo-page-marker) .block-container{max-width:1260px;padding-bottom:80px}
+        .stApp:has(.todo-page-marker) .block-container{max-width:var(--page-max);padding-bottom:80px}
         .todo-hero{padding:26px 0 18px;border-bottom:1px solid #e4e6eb}.todo-kicker{color:#147d75;font-size:12px;font-weight:750;letter-spacing:.12em}
         .todo-hero h2{margin:7px 0 5px;font-size:34px}.todo-hero p{margin:0;color:#747983}
         .todo-summary{display:grid;grid-template-columns:repeat(3,1fr);margin:18px 0;border-top:1px solid #e1e3e8;border-bottom:1px solid #e1e3e8}

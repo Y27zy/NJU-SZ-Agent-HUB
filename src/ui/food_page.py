@@ -42,7 +42,7 @@ def _inject_theme() -> None:
     st.markdown(
         """
         <style>
-        .stApp:has(.food-page-marker) .block-container { max-width:1120px; }
+        .stApp:has(.food-page-marker) .block-container { max-width:var(--page-max); }
         .food-result-card { border:1px solid #d9dce3; border-left:4px solid #5b2a86; padding:22px 24px; background:#fff; }
         .food-result-kicker { color:#147d75; font-size:12px; font-weight:750; text-transform:uppercase; }
         .food-result-title { color:#17191f; font-size:24px; font-weight:760; margin:7px 0 4px; }

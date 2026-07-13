@@ -26,7 +26,7 @@ def inject_subscription_theme() -> None:
     st.markdown(
         """
         <style>
-        .stApp:has(.subscription-page-marker) .block-container { max-width:1320px !important; }
+        .stApp:has(.subscription-page-marker) .block-container { max-width:var(--page-max) !important; }
         .stApp:has(.subscription-page-marker) .st-key-model_manager,
         .stApp:has(.subscription-page-marker) .st-key-subscription_preview { background:white;border:1px solid #e1e2e6;border-radius:6px;padding:22px; }
         .stApp:has(.subscription-page-marker) [data-testid="stForm"],

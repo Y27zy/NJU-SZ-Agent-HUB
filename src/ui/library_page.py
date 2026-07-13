@@ -65,7 +65,7 @@ def inject_library_theme(workspace: bool = False) -> None:
         """
         <style>
         .stApp:has(.library-page-marker), .stApp:has(.workspace-page-marker) { background:#fcfcfd !important; }
-        .stApp:has(.library-page-marker) .block-container { max-width:1480px !important; padding:0 2.4rem 3rem !important; }
+        .stApp:has(.library-page-marker) .block-container { max-width:var(--page-max) !important; padding:0 2.35rem 4.25rem !important; }
         .stApp.workspace-component-ready:has(.workspace-page-marker) .block-container { max-width:none !important; padding:0 !important; }
         .stApp.workspace-component-ready:has(.workspace-page-marker) [data-testid="stMainBlockContainer"] { gap:0 !important; }
         .stApp.workspace-component-ready:has(.workspace-page-marker) [data-testid="stMainBlockContainer"] > div,
