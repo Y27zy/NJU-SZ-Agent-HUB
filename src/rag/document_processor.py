@@ -1,4 +1,5 @@
 import base64
+import hashlib
 import json
 import math
 import re
@@ -21,7 +22,19 @@ from src.rag.text_splitter import split_text
 
 ProgressCallback = Callable[[int, int, str], None]
 MAX_STRUCTURE_INPUT = 52000
-MAX_CHAPTER_INPUT = 32000
+# Keep each long-document request small enough to finish reliably on hosted
+# OpenAI-compatible endpoints. Chapters can span many parts and are resumed
+# part by part by DocumentProcessingAgent.
+MAX_CHAPTER_INPUT = 4500
+
+
+def _retry_attempts_for_part(character_count: int, chapter_part_count: int) -> int:
+    """Allocate a bounded retry budget from the amount of chapter work at risk."""
+    if character_count >= 14000 or chapter_part_count >= 8:
+        return 6
+    if character_count >= 9000 or chapter_part_count >= 4:
+        return 5
+    return 4
 _PAGE_ANCHOR = re.compile(r"<!--\s*page\s*:\s*(\d+)\s*-->", re.IGNORECASE)
 _FRONT_MATTER_TERMS = (
     "版权所有", "copyright", "出版社", "出版发行", "出版者", "出版日期", "印刷", "印次",
@@ -510,17 +523,51 @@ def _clean_chapter(
     progress_text: str,
     figure_hints: dict[int, int] | None = None,
     page_roles: dict[int, str] | None = None,
+    part_cache: dict[str, str] | None = None,
+    on_part_complete: Callable[[str, str], None] | None = None,
+    before_part: Callable[[], None] | None = None,
+    on_part_progress: Callable[[int, int], None] | None = None,
+    on_part_error: Callable[[str, int, int, Exception], None] | None = None,
 ) -> str:
+    """Rebuild one chapter with resumable, content-addressed part calls."""
     outputs = []
+    if part_cache is None:
+        part_cache = {}
     parts = _chapter_parts(pages, chapter["start_page"], chapter["end_page"], figure_hints, page_roles)
     for part_index, part in enumerate(parts, 1):
+        if before_part:
+            before_part()
+        if on_part_progress:
+            on_part_progress(part_index, len(parts))
+        part_key = f"{part_index}:{hashlib.sha1(part.encode('utf-8')).hexdigest()[:16]}"
+        cached_output = str(part_cache.get(part_key) or "").strip()
+        if cached_output:
+            outputs.append(cached_output)
+            continue
         prompt = f"""章节标题：{chapter['title']}
 章节摘要：{chapter.get('summary', '')}
 关键词：{'、'.join(chapter.get('key_terms') or [])}
 这是本章第 {part_index}/{len(parts)} 个连续片段。请恢复为结构清晰的 Markdown。
 
 {part}"""
-        outputs.append(chat_with_user_model(user_id, CHAPTER_SYSTEM_PROMPT, prompt, temperature=0.05).strip())
+        try:
+            output = chat_with_user_model(
+                user_id,
+                CHAPTER_SYSTEM_PROMPT,
+                prompt,
+                temperature=0.05,
+                max_attempts=_retry_attempts_for_part(len(part), len(parts)),
+            ).strip()
+        except Exception as exc:
+            if on_part_error:
+                on_part_error(part_key, part_index, len(parts), exc)
+            raise
+        if before_part:
+            before_part()
+        if output:
+            outputs.append(output)
+            if on_part_complete:
+                on_part_complete(part_key, output)
     body = "\n\n".join(output for output in outputs if output)
     return f"## {chapter['title']}\n\n{body}".strip()
 
@@ -680,6 +727,12 @@ def _process_file(
     return result.original_text, result.markdown, result.page_count, result.structure_json
 
 
+def _should_resume_processing(document: dict) -> bool:
+    """Resume the last failed/cancelled run; rebuild a clean ready document."""
+    status = str(document.get("processing_status") or "ready").lower()
+    return status != "ready" or bool(str(document.get("processing_error") or "").strip())
+
+
 def process_document(
     user_id: int,
     file_path: str | Path,
@@ -726,9 +779,11 @@ def reprocess_document(
     path = Path(document.get("file_path") or "")
     if not path.exists():
         raise FileNotFoundError(f"原始文件不存在：{path}")
+    resume_from_cache = _should_resume_processing(document)
+    visible_status = "ready" if document.get("processed_markdown") else "processing"
     execute(
-        "UPDATE documents SET processing_status = 'processing', processing_error = NULL, updated_at = ? WHERE id = ? AND user_id = ?",
-        (now_iso(), document_id, user_id),
+        "UPDATE documents SET processing_status = ?, processing_error = NULL, updated_at = ? WHERE id = ? AND user_id = ?",
+        (visible_status, now_iso(), document_id, user_id),
     )
     try:
         original, markdown, page_count, structure_json = _process_file(
@@ -737,7 +792,7 @@ def reprocess_document(
             document["title"],
             document["doc_type"],
             progress,
-            force=True,
+            force=not resume_from_cache,
             cancel_check=cancel_check,
         )
         markdown = bind_document_images(markdown, extract_pdf_images(document_id, path))
@@ -751,10 +806,10 @@ def reprocess_document(
             execute(
                 """
                 UPDATE documents
-                SET processing_status = 'ready', processing_error = ?, updated_at = ?
+                SET processing_status = ?, processing_error = ?, updated_at = ?
                 WHERE id = ? AND user_id = ?
                 """,
-                (str(exc), now_iso(), document_id, user_id),
+                ("ready" if document.get("processed_markdown") else "error", str(exc), now_iso(), document_id, user_id),
             )
             raise
         if document.get("processed_markdown"):

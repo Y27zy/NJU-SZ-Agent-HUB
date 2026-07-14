@@ -101,23 +101,36 @@ def get_llm_for_user(user_id: int) -> BaseLLMProvider:
     return build_provider(get_default_model_config(user_id))
 
 
-def chat_with_user_messages(user_id: int, messages: list[dict], temperature: float = 0.7) -> str:
+def chat_with_user_messages(
+    user_id: int,
+    messages: list[dict],
+    temperature: float = 0.7,
+    max_attempts: int = 3,
+) -> str:
     """Call the selected real model with bounded retries for transient network failures."""
     provider = get_llm_for_user(user_id)
     last_error: LLMProviderError | None = None
-    for attempt in range(3):
+    attempts = max(1, min(int(max_attempts), 6))
+    for attempt in range(attempts):
         try:
             return provider.chat(messages, temperature=temperature)
         except LLMProviderError as exc:
             last_error = exc
-            if not _is_transient_model_error(exc) or attempt == 2:
+            if not _is_transient_model_error(exc) or attempt == attempts - 1:
                 raise
-            # Long document processing can survive a short network or rate-limit blip.
-            time.sleep(2 ** attempt)
+            # Spread retries out instead of immediately hammering an unavailable
+            # endpoint. Long-document callers may request a larger bounded budget.
+            time.sleep(min(30, 2 ** attempt))
     raise last_error or LLMProviderError("模型调用失败。")
 
 
-def chat_with_user_model(user_id: int, system_prompt: str, user_prompt: str, temperature: float = 0.7) -> str:
+def chat_with_user_model(
+    user_id: int,
+    system_prompt: str,
+    user_prompt: str,
+    temperature: float = 0.7,
+    max_attempts: int = 3,
+) -> str:
     return chat_with_user_messages(
         user_id,
         [
@@ -125,4 +138,5 @@ def chat_with_user_model(user_id: int, system_prompt: str, user_prompt: str, tem
             {"role": "user", "content": user_prompt},
         ],
         temperature=temperature,
+        max_attempts=max_attempts,
     )

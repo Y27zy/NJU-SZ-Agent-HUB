@@ -13,8 +13,9 @@ def now_iso() -> str:
 @contextmanager
 def get_connection() -> Iterator[sqlite3.Connection]:
     ensure_runtime_dirs()
-    conn = sqlite3.connect(get_db_path())
+    conn = sqlite3.connect(get_db_path(), timeout=30)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout = 30000")
     try:
         yield conn
         conn.commit()
@@ -24,6 +25,8 @@ def get_connection() -> Iterator[sqlite3.Connection]:
 
 def init_db() -> None:
     with get_connection() as conn:
+        conn.execute("PRAGMA journal_mode = WAL")
+        conn.execute("PRAGMA synchronous = NORMAL")
         conn.executescript(
             """
             CREATE TABLE IF NOT EXISTS users (
@@ -187,6 +190,28 @@ def init_db() -> None:
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
+
+            CREATE TABLE IF NOT EXISTS document_jobs (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                document_id INTEGER NOT NULL,
+                job_type TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'queued',
+                attempt_count INTEGER NOT NULL DEFAULT 0,
+                next_retry_at TEXT,
+                heartbeat_at TEXT,
+                progress_current INTEGER NOT NULL DEFAULT 0,
+                progress_total INTEGER NOT NULL DEFAULT 0,
+                progress_message TEXT,
+                error TEXT,
+                error_kind TEXT,
+                cancel_requested INTEGER NOT NULL DEFAULT 0,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL,
+                completed_at TEXT,
+                FOREIGN KEY(user_id) REFERENCES users(id),
+                FOREIGN KEY(document_id) REFERENCES documents(id)
+            );
             """
         )
         _migrate_documents(conn)
@@ -195,6 +220,19 @@ def init_db() -> None:
         _migrate_todos(conn)
         _migrate_memory_items(conn)
         conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_items_user_key ON memory_items(user_id, memory_key)")
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_document_jobs_due ON document_jobs(status, next_retry_at, created_at)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_document_jobs_user_document ON document_jobs(user_id, document_id, created_at)"
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_document_jobs_one_active_document
+            ON document_jobs(document_id)
+            WHERE status IN ('queued', 'running', 'retry_wait', 'cancelling')
+            """
+        )
         _ensure_default_admin(conn)
 
 

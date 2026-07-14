@@ -1,3 +1,4 @@
+import json
 from typing import Any
 
 import requests
@@ -23,6 +24,35 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             return "无法连接模型服务，请检查 API Base、代理、防火墙和当前 Python 环境的网络权限。"
         return str(exc)
 
+    @staticmethod
+    def _response_answer(response: requests.Response) -> str:
+        """Read either an SSE completion or a non-streaming compatibility response."""
+        content_type = str(response.headers.get("Content-Type") or "").lower()
+        if "text/event-stream" not in content_type:
+            data = response.json()
+            return str(data.get("choices", [{}])[0].get("message", {}).get("content", ""))
+
+        chunks: list[str] = []
+        for line in response.iter_lines(decode_unicode=True):
+            if not line:
+                continue
+            if isinstance(line, bytes):
+                line = line.decode("utf-8", errors="replace")
+            payload = line[5:].strip() if line.startswith("data:") else line.strip()
+            if payload == "[DONE]":
+                break
+            try:
+                event = json.loads(payload)
+            except json.JSONDecodeError:
+                continue
+            choice = (event.get("choices") or [{}])[0]
+            text = (choice.get("delta") or {}).get("content")
+            if text is None:
+                text = (choice.get("message") or {}).get("content")
+            if text:
+                chunks.append(str(text))
+        return "".join(chunks)
+
     def chat(self, messages: list[dict], temperature: float = 0.7) -> str:
         if not (self.api_base and self.api_key and self.model_name):
             raise LLMProviderError("模型配置不完整，必须填写 API Base、API Key 和模型名称。")
@@ -35,14 +65,23 @@ class OpenAICompatibleProvider(BaseLLMProvider):
             "model": self.model_name,
             "messages": messages,
             "temperature": temperature,
+            # Long Markdown generations can exceed the read timeout before a
+            # non-streaming endpoint sends its first byte. SSE keeps the
+            # connection active while tokens are generated.
+            "stream": True,
         }
         try:
             session = requests.Session()
             session.trust_env = USE_SYSTEM_PROXY
-            response = session.post(self._chat_url(), headers=headers, json=payload, timeout=(15, 240))
+            response = session.post(
+                self._chat_url(),
+                headers=headers,
+                json=payload,
+                timeout=(15, 240),
+                stream=True,
+            )
             response.raise_for_status()
-            data = response.json()
-            answer = data.get("choices", [{}])[0].get("message", {}).get("content", "")
+            answer = self._response_answer(response)
             if not answer:
                 raise LLMProviderError("模型返回了空内容，请检查模型名称和接口兼容性。")
             return answer

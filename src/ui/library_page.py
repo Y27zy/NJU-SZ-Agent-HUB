@@ -2,7 +2,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from src.agent.document_jobs import cancel_document_job, discard_document_job, get_document_job, start_reprocess_job
+from src.agent.document_jobs import cancel_document_job, get_active_document_jobs, start_new_document_job, start_reprocess_job
 from src.agent.reading_jobs import cancel_reading_job, discard_reading_job, get_reading_job, start_reading_job
 from src.auth.auth_service import activate_model_config, get_default_model_config, is_admin, list_model_configs
 from src.modules.library_agent import (
@@ -20,9 +20,9 @@ from src.modules.library_agent import (
     update_canvas_node,
 )
 from src.modules.paper_agent import summarize_paper
-from src.rag.document_processor import process_document
 from src.rag.document_assets import ensure_document_images
 from src.rag.simple_vector_store import (
+    create_document_record,
     delete_library_document,
     can_edit_library_document,
     get_library_document,
@@ -133,7 +133,13 @@ def _filtered_documents(documents: list[dict], category: str) -> list[dict]:
     return []
 
 
-def _document_rows(documents: list[dict], user_id: int, admin: bool) -> list[dict]:
+def _document_rows(
+    documents: list[dict],
+    user_id: int,
+    admin: bool,
+    jobs_by_document: dict[int, dict] | None = None,
+) -> list[dict]:
+    jobs_by_document = jobs_by_document or {}
     kind_labels = {"course": "课程", "paper": "论文", "other": "资料"}
     status_labels = {"ready": "可学习", "processing": "处理中", "error": "处理失败"}
     return [
@@ -146,6 +152,7 @@ def _document_rows(documents: list[dict], user_id: int, admin: bool) -> list[dic
             "global": bool(doc.get("is_global")),
             "can_delete": (not bool(doc.get("is_global")) and int(doc["user_id"]) == user_id) or (admin and bool(doc.get("is_global"))),
             "can_reprocess": (not bool(doc.get("is_global")) and int(doc["user_id"]) == user_id) or (admin and bool(doc.get("is_global"))),
+            "job": jobs_by_document.get(int(doc["id"])),
         }
         for doc in documents
     ]
@@ -212,25 +219,21 @@ def show_document_builder(user_id: int, library_scope: str = "custom", admin: bo
         if uploaded is None:
             st.warning("请先选择一个资料文件。")
             return
-        progress = st.progress(0, text="准备解析原文件")
-
-        def update_progress(current: int, total: int, message: str) -> None:
-            progress.progress(current / max(total, 1), text=message)
-
         try:
-            document_id = process_document(
+            file_path = _save_upload(user_id, uploaded)
+            document_id = create_document_record(
                 user_id,
-                _save_upload(user_id, uploaded),
-                uploaded.name,
                 doc_type,
+                uploaded.name,
+                file_path,
                 folder_id,
-                update_progress,
+                Path(file_path).suffix.lower().lstrip("."),
                 target_scope,
                 admin,
             )
-            st.session_state.library_document_id = document_id
+            start_new_document_job(user_id, document_id)
             st.session_state.library_view = "collection"
-            st.success(f"资料构建完成，已加入{scope_name}。")
+            st.toast(f"已加入{scope_name}，后台会持续整理直到完成。")
             st.rerun()
         except Exception as exc:
             st.error(f"构建失败：{exc}")
@@ -296,15 +299,14 @@ def _render_collection(user_id: int, documents: list[dict], admin: bool) -> None
         st.session_state.library_category = category
     categories = _category_data(documents, admin)
     filtered = _filtered_documents(documents, category)
-    job_id = st.session_state.get("library_reprocess_job", "")
-    job = get_document_job(job_id, user_id) if job_id else None
+    jobs_by_document = get_active_document_jobs(user_id)
     result = render_collection(
         categories,
-        _document_rows(filtered, user_id, admin),
+        _document_rows(filtered, user_id, admin, jobs_by_document),
         category,
         CATEGORY_LABELS.get(category, "自定义资料库"),
         can_add=True,
-        active_job=job,
+        active_job=None,
     )
     if _event_is_new("collection_command", result.command):
         if result.command["name"] == "back":
@@ -328,8 +330,8 @@ def _render_collection(user_id: int, documents: list[dict], admin: bool) -> None
         document_id = int(result.reprocess_document["id"])
         document = get_library_document(user_id, document_id)
         if document and int(document["user_id"]) == user_id:
-            st.session_state.library_reprocess_job = start_reprocess_job(user_id, document_id)
-            st.toast("已开始重新整理，可随时取消。")
+            start_reprocess_job(user_id, document_id)
+            st.toast("已加入后台整理队列；断连后会自动继续。")
         else:
             st.error("只有资料所有者可以重新整理。")
         st.rerun()
@@ -346,22 +348,9 @@ def _render_collection(user_id: int, documents: list[dict], admin: bool) -> None
         st.rerun()
     if _event_is_new("collection_reprocess_job", result.reprocess_job):
         event = result.reprocess_job
-        active_id = str(event.get("job_id") or job_id)
         if event.get("action") == "cancel":
-            if cancel_document_job(active_id, user_id):
+            if cancel_document_job(str(event.get("job_id") or ""), user_id):
                 st.toast("已请求取消，当前模型调用结束后会保留原有版本。")
-            st.rerun()
-        active = get_document_job(active_id, user_id)
-        if active and active["status"] in {"completed", "cancelled", "failed"}:
-            st.session_state.pop("library_reprocess_job", None)
-            discard_document_job(active_id, user_id)
-            if active["status"] == "completed":
-                st.success("资料已按当前模型重新整理。")
-            elif active["status"] == "cancelled":
-                st.info("已取消重新整理，原有资料版本保持不变。")
-            else:
-                st.error(f"重新整理失败：{active['error'] or '未知错误'}")
-            st.rerun()
         st.rerun()
 
 

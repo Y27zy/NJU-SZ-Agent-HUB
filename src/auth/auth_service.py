@@ -177,7 +177,7 @@ def delete_personal_account(actor_user_id: int, target_user_id: int) -> tuple[bo
         ]
         if document_ids:
             marks = ",".join("?" for _ in document_ids)
-            for table in ("document_questions", "document_mindmaps", "document_highlights", "document_chunks"):
+            for table in ("document_jobs", "document_questions", "document_mindmaps", "document_highlights", "document_chunks"):
                 conn.execute(f"DELETE FROM {table} WHERE document_id IN ({marks})", document_ids)
 
         conn.execute("DELETE FROM documents WHERE user_id = ?", (target_user_id,))

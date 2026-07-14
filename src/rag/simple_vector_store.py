@@ -156,6 +156,7 @@ def delete_document(user_id: int, document_id: int) -> bool:
     if not row:
         return False
     with get_connection() as conn:
+        conn.execute("DELETE FROM document_jobs WHERE document_id = ? AND user_id = ?", (document_id, user_id))
         conn.execute("DELETE FROM document_questions WHERE document_id = ? AND user_id = ?", (document_id, user_id))
         conn.execute("DELETE FROM document_mindmaps WHERE document_id = ? AND user_id = ?", (document_id, user_id))
         conn.execute("DELETE FROM document_highlights WHERE document_id = ? AND user_id = ?", (document_id, user_id))
@@ -232,6 +233,7 @@ def delete_library_document(actor_user_id: int, document_id: int, admin: bool = 
         return False
     owner_id = int(document["user_id"])
     with get_connection() as conn:
+        conn.execute("DELETE FROM document_jobs WHERE document_id = ?", (document_id,))
         conn.execute("DELETE FROM document_questions WHERE document_id = ?", (document_id,))
         conn.execute("DELETE FROM document_mindmaps WHERE document_id = ?", (document_id,))
         conn.execute("DELETE FROM document_highlights WHERE document_id = ?", (document_id,))

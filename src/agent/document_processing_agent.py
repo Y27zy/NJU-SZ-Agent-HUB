@@ -1,6 +1,11 @@
 import json
+import os
 import re
+import threading
+import time
+import uuid
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from collections.abc import Callable
 
@@ -11,6 +16,10 @@ from src.llm.gateway import chat_with_user_model
 from src.llm.providers import LLMProviderError
 from src.rag.document_parser import parse_document
 from src.rag.text_splitter import split_text
+
+
+_CACHE_LOCKS: dict[str, threading.Lock] = {}
+_CACHE_LOCKS_GUARD = threading.Lock()
 
 
 AUDIT_SYSTEM_PROMPT = """你是学术文档数字化的质量审计 Agent。检查结构化 Markdown 是否忠于原文并适合精读。
@@ -88,7 +97,33 @@ class DocumentProcessingAgent:
 
     def _save_cache(self, source_path: Path, cache: dict) -> None:
         cache["signature"] = self._cache_signature(source_path)
-        self._cache_path(source_path).write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+        cache_path = self._cache_path(source_path)
+        with _CACHE_LOCKS_GUARD:
+            cache_lock = _CACHE_LOCKS.setdefault(str(cache_path.resolve()), threading.Lock())
+        temporary = cache_path.with_name(f"{cache_path.name}.{os.getpid()}.{threading.get_ident()}.{uuid.uuid4().hex}.tmp")
+        with cache_lock:
+            try:
+                temporary.write_text(json.dumps(cache, ensure_ascii=False), encoding="utf-8")
+                for attempt in range(5):
+                    try:
+                        os.replace(temporary, cache_path)
+                        break
+                    except PermissionError:
+                        if attempt == 4:
+                            raise
+                        time.sleep(0.05 * (attempt + 1))
+            finally:
+                temporary.unlink(missing_ok=True)
+
+    @staticmethod
+    def _error_diagnostic(exc: Exception) -> dict:
+        """Return safe failure details without leaking request headers or secrets."""
+        cause = exc.__cause__
+        return {
+            "message": str(exc)[:1000],
+            "error_type": type(exc).__name__,
+            "cause_type": type(cause).__name__ if cause else None,
+        }
 
     def _load_pages(self, path: Path) -> list[str]:
         from src.rag.document_processor import _extract_pdf_pages, _ocr_page_with_model
@@ -264,7 +299,18 @@ class DocumentProcessingAgent:
 
         source_path = Path(path)
         self._raise_if_cancelled()
-        cache = self._load_cache(source_path)
+        cache_path = self._cache_path(source_path)
+        if force:
+            # A clean ready document explicitly starts a new processing run.
+            # Removing the old cache also ensures a later failure resumes this
+            # new run instead of accidentally restoring the previous result.
+            cache_path.unlink(missing_ok=True)
+            cache = {}
+            self._notify(0, 5, "已完成资料正在从原文件重新整理")
+        else:
+            cache = self._load_cache(source_path)
+            if cache:
+                self._notify(0, 5, "检测到未完成任务，正在从最近断点继续")
         cached_result = self._cached_result(cache)
         if cached_result and not force:
             self._notify(5, 5, "已读取同一文件与模型的完整处理结果")
@@ -329,6 +375,57 @@ class DocumentProcessingAgent:
                     self._notify(index, len(chapters), f"读取已完成章节 {index}/{len(chapters)}：{chapter['title']}")
                 else:
                     self._notify(index, len(chapters), f"重建主章节 {index}/{len(chapters)}：{chapter['title']}")
+                    chapter_part_cache = cache.setdefault("chapter_parts", {}).setdefault(cache_key, {})
+
+                    def checkpoint_part(part_index: int, part_total: int) -> None:
+                        cache["progress"] = {
+                            "stage": "chapter_part",
+                            "chapter_index": index,
+                            "chapter_total": len(chapters),
+                            "chapter_key": cache_key,
+                            "chapter_title": chapter["title"],
+                            "part_index": part_index,
+                            "part_total": part_total,
+                            "status": "running",
+                            "updated_at": datetime.now().isoformat(timespec="seconds"),
+                        }
+                        self._save_cache(source_path, cache)
+
+                    def save_part(part_key: str, output: str) -> None:
+                        chapter_part_cache[part_key] = output
+                        if isinstance(cache.get("progress"), dict):
+                            cache["progress"]["status"] = "completed"
+                            cache["progress"]["part_key"] = part_key
+                            cache["progress"]["updated_at"] = datetime.now().isoformat(timespec="seconds")
+                        self._save_cache(source_path, cache)
+
+                    def save_part_error(part_key: str, part_index: int, part_total: int, exc: Exception) -> None:
+                        failure = {
+                            **self._error_diagnostic(exc),
+                            "stage": "chapter_part",
+                            "chapter_index": index,
+                            "chapter_total": len(chapters),
+                            "chapter_key": cache_key,
+                            "chapter_title": chapter["title"],
+                            "part_key": part_key,
+                            "part_index": part_index,
+                            "part_total": part_total,
+                            "failed_at": datetime.now().isoformat(timespec="seconds"),
+                        }
+                        cache["last_failure"] = failure
+                        cache.setdefault("failures", []).append(failure)
+                        cache["failures"] = cache["failures"][-20:]
+                        cache["progress"] = {**failure, "status": "failed"}
+                        self._save_cache(source_path, cache)
+
+                    def show_part_progress(part_index: int, part_total: int) -> None:
+                        checkpoint_part(part_index, part_total)
+                        self._notify(
+                            index,
+                            len(chapters),
+                            f"整理章节 {index}/{len(chapters)}：{chapter['title']}（分片 {part_index}/{part_total}）",
+                        )
+
                     chapter_markdown = _clean_chapter(
                         self.user_id,
                         chapter,
@@ -336,9 +433,23 @@ class DocumentProcessingAgent:
                         chapter["title"],
                         figure_hints,
                         page_roles,
+                        part_cache=chapter_part_cache,
+                        on_part_complete=save_part,
+                        before_part=self._raise_if_cancelled,
+                        on_part_progress=show_part_progress,
+                        on_part_error=save_part_error,
                     )
                     self._raise_if_cancelled()
                     cache.setdefault("chapters", {})[cache_key] = chapter_markdown
+                    cache["progress"] = {
+                        "stage": "chapter",
+                        "chapter_index": index,
+                        "chapter_total": len(chapters),
+                        "chapter_key": cache_key,
+                        "chapter_title": chapter["title"],
+                        "status": "completed",
+                        "updated_at": datetime.now().isoformat(timespec="seconds"),
+                    }
                     self._save_cache(source_path, cache)
                 markdown_sections.append(chapter_markdown)
             markdown = "\n\n".join(markdown_sections)

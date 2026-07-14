@@ -2,6 +2,7 @@ import streamlit as st
 
 from src.config import ensure_runtime_dirs
 from src.database import init_db
+from src.agent.document_jobs import ensure_document_job_worker
 from src.ui.about_page import render_about_page
 from src.ui.dashboard_page import render_dashboard_page
 from src.ui.food_page import render_food_page
@@ -91,6 +92,7 @@ def render_top_navigation() -> str:
 def main() -> None:
     ensure_runtime_dirs()
     init_db()
+    ensure_document_job_worker()
     st.set_page_config(page_title="NJU-SZ Agent Hub", page_icon="N", layout="wide", initial_sidebar_state="collapsed", menu_items={})
     inject_theme()
     if "user" not in st.session_state:

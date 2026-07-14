@@ -2,6 +2,7 @@ import unittest
 from unittest.mock import patch
 
 from src.rag.document_processor import (
+    _clean_chapter,
     _clean_complete_document,
     _classify_document_pages,
     _deduplicate_markdown,
@@ -10,10 +11,23 @@ from src.rag.document_processor import (
     _remove_non_learning_markdown,
     _structure_from_page_headings,
     _remove_repeated_page_noise,
+    _retry_attempts_for_part,
+    _should_resume_processing,
 )
+from src.llm.providers import LLMProviderError
 
 
 class DocumentProcessingTests(unittest.TestCase):
+    def test_reprocess_mode_distinguishes_clean_ready_from_failed_run(self) -> None:
+        self.assertFalse(_should_resume_processing({"processing_status": "ready", "processing_error": None}))
+        self.assertTrue(_should_resume_processing({"processing_status": "error", "processing_error": "timeout"}))
+        self.assertTrue(_should_resume_processing({"processing_status": "ready", "processing_error": "last retry failed"}))
+
+    def test_retry_budget_scales_with_part_workload(self) -> None:
+        self.assertEqual(_retry_attempts_for_part(4000, 2), 4)
+        self.assertEqual(_retry_attempts_for_part(10000, 4), 5)
+        self.assertEqual(_retry_attempts_for_part(15000, 9), 6)
+
     def test_short_course_uses_one_complete_reconstruction(self) -> None:
         pages = ["期末复习重点\n线性模型", "决策树\n支持向量机", "神经网络"]
         profile = _document_profile(pages, "复习重点", "课程")
@@ -118,6 +132,53 @@ class DocumentProcessingTests(unittest.TestCase):
         self.assertIsNotNone(structure)
         self.assertEqual([item["title"] for item in structure["chapters"]], ["Chapter 1 Basics", "Chapter 2 Relations"])
         self.assertEqual(structure["chapters"][0]["end_page"], 3)
+
+    @patch("src.rag.document_processor.chat_with_user_model")
+    def test_long_chapter_resumes_after_the_failed_part(self, chat) -> None:
+        pages = ["A" * 10000, "B" * 10000]
+        chapter = {"title": "长章节", "start_page": 1, "end_page": 2, "summary": "", "key_terms": []}
+        cached_parts: dict[str, str] = {}
+
+        def save_part(key: str, output: str) -> None:
+            cached_parts[key] = output
+
+        chat.side_effect = ["第一分片已整理", LLMProviderError("模型请求超时")]
+        with self.assertRaises(LLMProviderError):
+            _clean_chapter(1, chapter, pages, "长章节", part_cache=cached_parts, on_part_complete=save_part)
+
+        self.assertEqual(len(cached_parts), 1)
+        chat.reset_mock()
+        chat.side_effect = None
+        chat.return_value = "第二分片已整理"
+
+        markdown = _clean_chapter(
+            1,
+            chapter,
+            pages,
+            "长章节",
+            part_cache=cached_parts,
+            on_part_complete=save_part,
+        )
+
+        self.assertEqual(chat.call_count, 1)
+        self.assertIn("第一分片已整理", markdown)
+        self.assertIn("第二分片已整理", markdown)
+
+    @patch("src.rag.document_processor.chat_with_user_model")
+    def test_failed_part_reports_its_resumable_checkpoint(self, chat) -> None:
+        pages = ["A" * 10000]
+        chapter = {"title": "长章节", "start_page": 1, "end_page": 1, "summary": "", "key_terms": []}
+        failures = []
+        chat.side_effect = LLMProviderError("模型请求超时")
+
+        with self.assertRaises(LLMProviderError):
+            _clean_chapter(1, chapter, pages, "长章节", on_part_error=lambda *args: failures.append(args))
+
+        self.assertEqual(len(failures), 1)
+        part_key, part_index, part_total, error = failures[0]
+        self.assertTrue(part_key.startswith("1:"))
+        self.assertEqual((part_index, part_total), (1, 1))
+        self.assertIsInstance(error, LLMProviderError)
 
     @patch("src.rag.document_processor.chat_with_user_model")
     def test_complete_reconstruction_uses_one_call_and_normalizes_wrapper(self, chat) -> None:
