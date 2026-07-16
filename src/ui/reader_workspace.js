@@ -184,6 +184,16 @@ export default function (component) {
   const renderSidebar = () => {
     const sections = data?.sections || [];
     const models = data?.models || [];
+    const explicitActive = sections.some((item) => item.active);
+    const documentCount = sections.filter((item) => item.kind === 'document').length;
+    const navigationMarkup = sections.map((item, index) => {
+      if (item.kind === 'group') return `<div class="section-group">${esc(item.label)}</div>`;
+      const isActive = item.active || (!explicitActive && index === 0);
+      const target = item.document_id
+        ? `data-document-id="${Number(item.document_id)}"`
+        : `data-section="${esc(item.id)}"`;
+      return `<button class="section-button ${isActive ? 'is-active' : ''}" style="--depth:${Math.max(0, item.level - 1)}" ${target}>${esc(item.label)}</button>`;
+    }).join('');
     side.innerHTML = `
       <div class="side-top">
         <button class="side-icon" data-command="collapse-side" title="收起目录">☰</button>
@@ -193,8 +203,8 @@ export default function (component) {
       </div>
       <div class="side-doc">${esc(data?.title || '资料')}</div>
       <nav class="section-list">
-        <div class="section-label">章节目录 · ${sections.length}</div>
-        ${sections.map((item, index) => `<button class="section-button ${index === 0 ? 'is-active' : ''}" style="--depth:${Math.max(0, item.level - 1)}" data-section="${esc(item.id)}">${esc(item.label)}</button>`).join('')}
+        <div class="section-label">章节目录 · ${documentCount || sections.length}</div>
+        ${navigationMarkup}
         <div class="highlight-list"></div>
       </nav>
       <footer class="sidebar-footer">
@@ -594,6 +604,14 @@ export default function (component) {
       return;
     }
 
+    const targetDocument = event.target.closest('[data-document-id]');
+    if (targetDocument) {
+      const targetId = Number(targetDocument.dataset.documentId || 0);
+      if (targetId && targetId !== documentId) {
+        setTriggerValue('section_document', { id: targetId, nonce: Date.now() });
+      }
+      return;
+    }
     const section = event.target.closest('[data-section]');
     if (section) {
       reader.querySelector(`#${CSS.escape(section.dataset.section)}`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });

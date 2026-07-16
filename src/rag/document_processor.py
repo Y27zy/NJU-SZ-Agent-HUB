@@ -89,6 +89,11 @@ COMPLETE_DOCUMENT_SYSTEM_PROMPT = r"""你是文档数字化处理 Agent。输入
 只输出正文 Markdown，不要输出文档一级标题，也不要解释处理过程。"""
 
 
+WEB_READABILITY_RULES = r"""
+
+网页阅读附加规则：定义、定理、证明、结论和注意事项使用加粗标签与普通段落，不使用 Markdown 引用块，任何正文行都不要以 > 开头。PDF 若整页是扫描图片，必须以识别后的 Markdown 文字和 LaTeX 为主，绝不把整页扫描截图作为插图保留；只有独立的几何示意图、流程图或无法用文字表达的真实图表才可标记保留。"""
+
+
 def _extract_json(text: str) -> dict:
     cleaned = text.strip()
     fenced = re.search(r"```(?:json)?\s*(\{.*\})\s*```", cleaned, flags=re.DOTALL | re.IGNORECASE)
@@ -342,7 +347,7 @@ def _ocr_page_with_model(user_id: int, path: Path, page_number: int) -> str:
         pixmap = page.get_pixmap(matrix=fitz.Matrix(1.7, 1.7), alpha=False)
     image_data = base64.b64encode(pixmap.tobytes("jpeg")).decode("ascii")
     messages = [
-        {"role": "system", "content": CHAPTER_SYSTEM_PROMPT},
+        {"role": "system", "content": CHAPTER_SYSTEM_PROMPT + WEB_READABILITY_RULES},
         {
             "role": "user",
             "content": [
@@ -553,7 +558,7 @@ def _clean_chapter(
         try:
             output = chat_with_user_model(
                 user_id,
-                CHAPTER_SYSTEM_PROMPT,
+                CHAPTER_SYSTEM_PROMPT + WEB_READABILITY_RULES,
                 prompt,
                 temperature=0.05,
                 max_attempts=_retry_attempts_for_part(len(part), len(parts)),
@@ -589,7 +594,7 @@ def _clean_complete_document(
         if page_roles.get(page_number, "content") == "content"
     )
     prompt = f"文档标题：{title}\n总页数：{len(pages)}\n\n完整分页原文：\n{source}"
-    body = chat_with_user_model(user_id, COMPLETE_DOCUMENT_SYSTEM_PROMPT, prompt, temperature=0.03).strip()
+    body = chat_with_user_model(user_id, COMPLETE_DOCUMENT_SYSTEM_PROMPT + WEB_READABILITY_RULES, prompt, temperature=0.03).strip()
     fenced = re.fullmatch(r"```(?:markdown|md)?\s*(.*?)\s*```", body, flags=re.DOTALL | re.IGNORECASE)
     if fenced:
         body = fenced.group(1).strip()
@@ -615,6 +620,7 @@ def _deduplicate_markdown(markdown: str) -> str:
     result = "\n\n".join(output)
     result = re.sub(r"\\\((.+?)\\\)", r"$\1$", result, flags=re.DOTALL)
     result = re.sub(r"\\\[(.+?)\\\]", r"$$\1$$", result, flags=re.DOTALL)
+    result = re.sub(r"(?m)^[ \t]*>+[ \t]?", "", result)
     return result.strip()
 
 

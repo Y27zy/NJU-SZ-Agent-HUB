@@ -67,6 +67,13 @@ def init_db() -> None:
                 is_global INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 updated_at TEXT,
+                parent_document_id INTEGER,
+                document_role TEXT NOT NULL DEFAULT 'standalone',
+                group_title TEXT,
+                section_key TEXT,
+                sort_order INTEGER NOT NULL DEFAULT 0,
+                source_start_page INTEGER,
+                source_end_page INTEGER,
                 FOREIGN KEY(user_id) REFERENCES users(id)
             );
 
@@ -227,6 +234,22 @@ def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_document_jobs_user_document ON document_jobs(user_id, document_id, created_at)"
         )
         conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_documents_parent_order ON documents(parent_document_id, sort_order, id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_documents_user_hierarchy ON documents(user_id, parent_document_id, sort_order, id)"
+        )
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_documents_global_hierarchy ON documents(is_global, library_scope, parent_document_id, sort_order, id)"
+        )
+        conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_documents_parent_section_key
+            ON documents(parent_document_id, section_key)
+            WHERE parent_document_id IS NOT NULL AND section_key IS NOT NULL
+            """
+        )
+        conn.execute(
             """
             CREATE UNIQUE INDEX IF NOT EXISTS idx_document_jobs_one_active_document
             ON document_jobs(document_id)
@@ -289,6 +312,13 @@ def _migrate_documents(conn: sqlite3.Connection) -> None:
         "structure_json": "ALTER TABLE documents ADD COLUMN structure_json TEXT",
         "library_scope": "ALTER TABLE documents ADD COLUMN library_scope TEXT NOT NULL DEFAULT 'custom'",
         "is_global": "ALTER TABLE documents ADD COLUMN is_global INTEGER NOT NULL DEFAULT 0",
+        "parent_document_id": "ALTER TABLE documents ADD COLUMN parent_document_id INTEGER",
+        "document_role": "ALTER TABLE documents ADD COLUMN document_role TEXT NOT NULL DEFAULT 'standalone'",
+        "group_title": "ALTER TABLE documents ADD COLUMN group_title TEXT",
+        "section_key": "ALTER TABLE documents ADD COLUMN section_key TEXT",
+        "sort_order": "ALTER TABLE documents ADD COLUMN sort_order INTEGER NOT NULL DEFAULT 0",
+        "source_start_page": "ALTER TABLE documents ADD COLUMN source_start_page INTEGER",
+        "source_end_page": "ALTER TABLE documents ADD COLUMN source_end_page INTEGER",
     }
     for column, statement in migrations.items():
         if column not in existing:

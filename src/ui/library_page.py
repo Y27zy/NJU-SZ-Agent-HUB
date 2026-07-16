@@ -20,13 +20,15 @@ from src.modules.library_agent import (
     update_canvas_node,
 )
 from src.modules.paper_agent import summarize_paper
-from src.rag.document_assets import ensure_document_images
+from src.rag.document_assets import ensure_document_images, full_page_scan_pages
+from src.rag.markdown_quality import optimize_scanned_page_markdown
 from src.rag.simple_vector_store import (
     create_document_record,
     delete_library_document,
     can_edit_library_document,
     get_library_document,
     get_document_chunks,
+    list_document_sections,
     list_library_documents,
     update_document_markdown,
     update_document_assets_markdown,
@@ -81,6 +83,8 @@ def inject_library_theme(workspace: bool = False) -> None:
 
 
 def _category_data(documents: list[dict], admin: bool) -> list[dict]:
+    documents = [doc for doc in documents if doc.get("document_role", "standalone") != "section"]
+
     def count_scope(scope: str) -> int:
         direct = sum(doc.get("library_scope") == scope for doc in documents)
         if admin:
@@ -149,9 +153,16 @@ def _document_rows(
             "kind": kind_labels.get(doc["doc_type"], "资料"),
             "status": status_labels.get(doc.get("processing_status"), "可学习"),
             "pages": doc.get("page_count") or 0,
+            "source_start_page": doc.get("source_start_page"),
+            "source_end_page": doc.get("source_end_page"),
             "global": bool(doc.get("is_global")),
-            "can_delete": (not bool(doc.get("is_global")) and int(doc["user_id"]) == user_id) or (admin and bool(doc.get("is_global"))),
-            "can_reprocess": (not bool(doc.get("is_global")) and int(doc["user_id"]) == user_id) or (admin and bool(doc.get("is_global"))),
+            "role": doc.get("document_role") or "standalone",
+            "parent_id": doc.get("parent_document_id"),
+            "group_title": doc.get("group_title") or "",
+            "sort_order": int(doc.get("sort_order") or 0),
+            "can_study": (doc.get("processing_status") or "ready") == "ready",
+            "can_delete": doc.get("document_role", "standalone") != "section" and ((not bool(doc.get("is_global")) and int(doc["user_id"]) == user_id) or (admin and bool(doc.get("is_global")))),
+            "can_reprocess": doc.get("document_role", "standalone") != "section" and ((not bool(doc.get("is_global")) and int(doc["user_id"]) == user_id) or (admin and bool(doc.get("is_global")))),
             "job": jobs_by_document.get(int(doc["id"])),
         }
         for doc in documents
@@ -272,10 +283,21 @@ def show_document_editor(user_id: int, document: dict, admin: bool) -> None:
         height=560,
         key=f"document_editor_{document['id']}",
     )
-    cancel, save = st.columns(2)
+    cancel, optimize, save = st.columns(3)
     if cancel.button("取消", use_container_width=True):
         st.session_state.pop("library_edit_document", None)
         st.rerun()
+    if optimize.button("优化扫描版排版", use_container_width=True):
+        scan_pages = full_page_scan_pages(document.get("file_path") or "")
+        optimized = optimize_scanned_page_markdown(content, scan_pages)
+        if optimized == content.strip():
+            st.info("当前正文不需要额外清理。")
+        elif update_document_markdown(user_id, int(document["id"]), optimized, admin=admin):
+            st.session_state.pop("library_edit_document", None)
+            st.success("已清理误用引用块，并折叠或移除整页扫描截图。")
+            st.rerun()
+        else:
+            st.error("优化失败：你没有权限，或正文内容为空。")
     if save.button("保存正文修改", type="primary", use_container_width=True):
         if update_document_markdown(user_id, int(document["id"]), content, admin=admin):
             st.session_state.pop("library_edit_document", None)
@@ -302,7 +324,12 @@ def _render_collection(user_id: int, documents: list[dict], admin: bool) -> None
     jobs_by_document = get_active_document_jobs(user_id)
     result = render_collection(
         categories,
-        _document_rows(filtered, user_id, admin, jobs_by_document),
+        _document_rows(
+            [doc for doc in filtered if doc.get("document_role", "standalone") != "section"],
+            user_id,
+            admin,
+            jobs_by_document,
+        ),
         category,
         CATEGORY_LABELS.get(category, "自定义资料库"),
         can_add=True,
@@ -322,6 +349,7 @@ def _render_collection(user_id: int, documents: list[dict], admin: bool) -> None
         document = get_library_document(user_id, document_id)
         if document and (document.get("processing_status") or "ready") == "ready":
             st.session_state.library_document_id = document_id
+            st.session_state.pop("library_section_document_id", None)
             st.session_state.library_view = "workspace"
             st.rerun()
         else:
@@ -397,13 +425,64 @@ def _workspace_nodes(user_id: int, document_id: int) -> list[dict]:
     return nodes
 
 
+def _collection_navigation(sections: list[dict], active_document_id: int) -> list[dict]:
+    navigation: list[dict] = []
+    current_group = None
+    for section in sections:
+        group = section.get("group_title") or "其他内容"
+        if group != current_group:
+            current_group = group
+            navigation.append(
+                {
+                    "id": f"group-{len(navigation)}",
+                    "label": group,
+                    "level": 1,
+                    "kind": "group",
+                }
+            )
+        navigation.append(
+            {
+                "id": f"document-{section['id']}",
+                "label": section["title"],
+                "level": 2,
+                "kind": "document",
+                "document_id": int(section["id"]),
+                "active": int(section["id"]) == active_document_id,
+            }
+        )
+    return navigation
+
+
 def _render_workspace(user_id: int) -> None:
     inject_library_theme(workspace=True)
     document_id = st.session_state.get("library_document_id")
-    document = get_library_document(user_id, document_id) if document_id else None
-    if not document:
+    root_document = get_library_document(user_id, document_id) if document_id else None
+    if not root_document:
         st.session_state.library_view = "collection"
         st.rerun()
+    if root_document.get("document_role") == "section" and root_document.get("parent_document_id"):
+        section_document = root_document
+        parent = get_library_document(user_id, int(root_document["parent_document_id"]))
+        if parent:
+            root_document = parent
+            st.session_state.library_document_id = int(parent["id"])
+            st.session_state.library_section_document_id = int(section_document["id"])
+
+    collection_sections = []
+    document = root_document
+    navigation_sections = None
+    if root_document.get("document_role") == "collection":
+        collection_sections = list_document_sections(user_id, int(root_document["id"]))
+        valid_ids = {int(section["id"]) for section in collection_sections}
+        active_document_id = int(st.session_state.get("library_section_document_id") or 0)
+        if active_document_id not in valid_ids and collection_sections:
+            active_document_id = int(collection_sections[0]["id"])
+            st.session_state.library_section_document_id = active_document_id
+        active_document = get_library_document(user_id, active_document_id) if active_document_id else None
+        if active_document:
+            document = active_document
+        navigation_sections = _collection_navigation(collection_sections, int(document["id"]))
+
     admin = is_admin(user_id)
     can_edit_document = can_edit_library_document(user_id, document, admin=admin)
     if st.session_state.get("library_edit_document") == int(document["id"]):
@@ -412,20 +491,22 @@ def _render_workspace(user_id: int) -> None:
     highlights = list_highlights(user_id, document["id"])
     reader_api = ensure_reader_api_server()
     markdown_source = _document_markdown(user_id, document)
-    refreshed_markdown = ensure_document_images(document["id"], document.get("file_path") or "", markdown_source)
+    asset_document_id = int(root_document["id"])
+    refreshed_markdown = ensure_document_images(asset_document_id, document.get("file_path") or "", markdown_source)
     if refreshed_markdown != markdown_source:
         update_document_assets_markdown(document["id"], refreshed_markdown)
         document["processed_markdown"] = refreshed_markdown
         markdown_source = refreshed_markdown
     result = render_study_workspace(
-        title=document["title"],
+        title=root_document["title"],
         markdown_source=markdown_source,
+        navigation_sections=navigation_sections,
         models=models,
         current_model=current_model,
         nodes=_workspace_nodes(user_id, document["id"]),
         highlights=highlights,
         context_mode=st.session_state.get("workspace_context", "section"),
-        is_paper=document["doc_type"] == "paper",
+        is_paper=root_document["doc_type"] == "paper",
         document_id=document["id"],
         completed_action=st.session_state.get("workspace_completed_action"),
         agent_error=st.session_state.get("workspace_agent_error", ""),
@@ -436,11 +517,23 @@ def _render_workspace(user_id: int) -> None:
         user_id=user_id,
         api_base=reader_api["base_url"],
         api_token=reader_api["token"],
-        asset_base_url=f"{reader_api['base_url']}/assets/{document['id']}/?token={reader_api['token']}&user_id={user_id}",
+        asset_base_url=f"{reader_api['base_url']}/assets/{asset_document_id}/?token={reader_api['token']}&user_id={user_id}",
         can_edit_document=can_edit_document,
     )
+    if _event_is_new("workspace_section_document", result.section_document):
+        target_id = int(result.section_document.get("id") or 0)
+        valid_ids = {int(section["id"]) for section in collection_sections}
+        if target_id in valid_ids and target_id != int(document["id"]):
+            st.session_state.library_section_document_id = target_id
+            st.session_state.workspace_reader_scroll = 0
+            st.session_state.pop("workspace_reading_job", None)
+            st.session_state.pop("workspace_reading_action", None)
+            st.session_state.pop("workspace_completed_action", None)
+            st.session_state.workspace_agent_error = ""
+            st.rerun()
     if _event_is_new("workspace_command", result.command):
         if result.command["name"] == "back":
+            st.session_state.pop("library_section_document_id", None)
             st.session_state.library_view = "collection"
             st.rerun()
         if result.command["name"] == "subscription":

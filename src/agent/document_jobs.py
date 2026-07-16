@@ -92,6 +92,14 @@ def ensure_document_job_worker() -> None:
 def enqueue_document_job(user_id: int, document_id: int, job_type: str = "reprocess") -> str:
     """Create one durable job, returning the existing active job on duplicate clicks."""
     ensure_document_job_worker()
+    document = fetch_one(
+        "SELECT document_role FROM documents WHERE id = ? AND user_id = ?",
+        (document_id, user_id),
+    )
+    if not document:
+        raise ValueError("Document does not exist or is not owned by this user.")
+    if document["document_role"] == "section":
+        raise ValueError("Generated section documents are refreshed through their parent collection.")
     placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
     existing = fetch_one(
         f"""

@@ -109,6 +109,88 @@ export default function(component){
 """
 
 
+COLLECTION_CSS_V2 = COLLECTION_CSS + """
+.collection-tree{display:grid;gap:18px;padding-top:16px}
+.collection-node{border:1px solid #d9d1e2;background:#fff}
+.collection-node>.doc-row{border:0;background:#faf7fc}
+.collection-node>.doc-row:hover{border:0}
+.collection-badge{display:inline-flex;margin-left:9px;padding:2px 7px;border-radius:10px;background:#e9ddf3;color:#5b2a86;font-size:11px;vertical-align:2px}
+.chapter-group{padding:0 16px 16px;border-top:1px solid #ebe5ef}
+.chapter-title{padding:15px 4px 10px;color:#44235f;font-size:15px;font-weight:750}
+.section-list{display:grid;gap:8px;margin-left:14px}
+.section-list .doc-row{padding:13px 15px;border-color:#ece8ef;background:#fff}
+.section-list .doc-title{font-size:14px}
+.section-list .doc-actions button{height:34px;padding:0 14px}
+.page-range{color:#5b2a86}
+@media(max-width:800px){.section-list{margin-left:0}.chapter-group{padding-left:10px;padding-right:10px}}
+"""
+
+COLLECTION_JS_V2 = """
+export default function(component){
+  const {data,parentElement,setTriggerValue}=component;
+  const root=parentElement.querySelector('#collection-view');
+  (parentElement.closest?.('.stApp')||parentElement.getRootNode()?.host?.closest?.('.stApp'))?.classList.remove('workspace-component-ready');
+  const cats=data?.categories||[],docs=data?.documents||[],active=data?.active||'custom';
+  const esc=value=>String(value??'').replace(/[&<>\"']/g,ch=>({'&':'&amp;','<':'&lt;','>':'&gt;','\"':'&quot;',"'":'&#39;'}[ch]));
+  const topDocs=docs.filter(d=>d.role!=='section');
+  const knownParents=new Set(topDocs.map(d=>Number(d.id)));
+  const orphanSections=docs.filter(d=>d.role==='section'&&!knownParents.has(Number(d.parent_id)));
+  const visibleRoots=[...topDocs,...orphanSections];
+  const jobs=topDocs.map(d=>d.job).filter(Boolean);
+  const childrenByParent=new Map();
+  docs.filter(d=>d.role==='section'&&knownParents.has(Number(d.parent_id))).forEach(d=>{
+    const key=Number(d.parent_id),items=childrenByParent.get(key)||[];items.push(d);childrenByParent.set(key,items);
+  });
+  childrenByParent.forEach(items=>items.sort((a,b)=>(a.sort_order||0)-(b.sort_order||0)||a.id-b.id));
+  const signature=JSON.stringify({active,docs:docs.map(d=>[d.id,d.title,d.status,d.pages,d.role,d.parent_id,d.group_title,d.sort_order,d.can_delete,d.can_reprocess,d.can_study,d.job&&[d.job.id,d.job.status,d.job.progress_message,d.job.attempt_count,d.job.next_retry_at]]),cats:cats.map(c=>[c.key,c.count]),canAdd:!!data?.canAdd});
+
+  const pageText=d=>{
+    if(d.source_start_page){return d.source_start_page===d.source_end_page?`第 ${d.source_start_page} 页`:`第 ${d.source_start_page}–${d.source_end_page} 页`;}
+    return d.pages?`${d.pages} 页`:'';
+  };
+  const renderRow=(d,child=false)=>{
+    const job=d.job,busy=!!job,busyText=job?.progress_message||(job?.status==='queued'?'等待后台处理':'后台整理中');
+    const meta=[d.kind,d.global?'全局同步':'仅自己可见',busy?busyText:d.status,pageText(d)].filter(Boolean).join(' · ');
+    const retry=job?.attempt_count?` · 已自动续跑 ${job.attempt_count} 次`:'';
+    const roleBadge=d.role==='collection'?'<span class="collection-badge">章节资料集</span>':'';
+    const controls=busy
+      ? `<button class="cancel" data-cancel-job="${esc(job.id)}">取消整理</button>`
+      : `${d.can_reprocess?`<button data-reprocess="${d.id}" title="重新识别章节并更新全部小节">重新整理</button>`:''}${d.can_delete?`<button class="danger" data-delete="${d.id}">删除</button>`:''}`;
+    const study=d.can_study?`<button data-open="${d.id}" class="study">学习</button>`:'';
+    return `<article class="doc-row ${child?'is-child':''}"><div><div class="doc-title">${esc(d.title)}${roleBadge}</div><div class="doc-meta">${esc(meta)}${retry}</div></div><div class="doc-actions">${controls}${study}</div></article>`;
+  };
+  const renderRoot=d=>{
+    if(d.role!=='collection')return renderRow(d);
+    const children=childrenByParent.get(Number(d.id))||[];
+    const groups=[];
+    children.forEach(child=>{
+      const title=child.group_title||'其他内容';let group=groups.at(-1);
+      if(!group||group.title!==title){group={title,items:[]};groups.push(group);}group.items.push(child);
+    });
+    return `<section class="collection-node">${renderRow(d)}${groups.map(group=>`<div class="chapter-group"><div class="chapter-title">${esc(group.title)}</div><div class="section-list">${group.items.map(child=>renderRow(child,true)).join('')}</div></div>`).join('')}</section>`;
+  };
+  const listMarkup=visibleRoots.length
+    ? `<div class="collection-tree">${visibleRoots.map(renderRoot).join('')}</div>`
+    : `<div class="empty-library"><strong>这里还没有资料</strong><span>${data?.canAdd?'点击“构建新资料”，把 PDF、PPTX 或 Markdown 整理成可交互原文。':'这里暂时没有公开资料。'}</span></div>`;
+  const markup=`<div class="collection-shell"><aside class="collection-side"><button class="back-button" data-command="back">← 返回分类大厅</button><h2 class="side-title">资料库分类</h2>${cats.map(c=>`<button class="category-button ${c.key===active?'is-active':''}" data-category="${esc(c.key)}"><span>${esc(c.label)}</span><small>${c.count}</small></button>`).join('')}</aside>
+  <section class="collection-main"><header class="collection-head"><div><h1 class="collection-title">${esc(data?.title||'自定义资料库')}</h1><div class="doc-meta">${visibleRoots.length} 份资料${active==='custom'?' · 由当前账号维护':' · 本地资料与全局资料同时显示'}</div></div>${data?.canAdd?'<button class="build-button" data-command="add">＋ 构建新资料</button>':''}</header>${listMarkup}</section></div>`;
+  if(root.__signature!==signature){root.innerHTML=markup;root.__signature=signature;}
+  const pollTimer=jobs.length?setInterval(()=>setTriggerValue('reprocess_job',{action:'poll',nonce:Date.now()}),1500):null;
+  const click=e=>{
+    const t=e.target.closest('button');if(!t||t.disabled)return;
+    if(t.dataset.command)setTriggerValue('command',{name:t.dataset.command,nonce:Date.now()});
+    if(t.dataset.category)setTriggerValue('category',{key:t.dataset.category,nonce:Date.now()});
+    if(t.dataset.open){t.disabled=true;t.textContent='正在打开';t.closest('.doc-row')?.classList.add('is-opening');setTriggerValue('open_document',{id:Number(t.dataset.open),nonce:Date.now()});}
+    if(t.dataset.reprocess)setTriggerValue('reprocess_document',{id:Number(t.dataset.reprocess),nonce:Date.now()});
+    if(t.dataset.cancelJob)setTriggerValue('reprocess_job',{action:'cancel',job_id:t.dataset.cancelJob,nonce:Date.now()});
+    if(t.dataset.delete&&confirm('确定删除这份资料吗？此操作会删除原文件、所有小节、索引和阅读记录。'))setTriggerValue('delete_document',{id:Number(t.dataset.delete),nonce:Date.now()});
+  };
+  root.addEventListener('click',click);
+  return()=>{root.removeEventListener('click',click);if(pollTimer)clearInterval(pollTimer);};
+}
+"""
+
+
 WORKSPACE_HTML = """
 <main id="study-workspace">
   <aside id="study-sidebar"></aside>
@@ -127,12 +209,14 @@ WORKSPACE_CSS = KATEX_CSS + """
 .side-top{display:flex;align-items:center;gap:8px;height:38px;padding:0 10px;border-bottom:1px solid #ddd5e5;font-size:13px;color:#44235f}.side-icon{display:grid;place-items:center;width:28px;height:28px;border:0;background:transparent;color:#5b2a86;cursor:pointer}.side-brand{white-space:nowrap}.workspace-badge{padding:3px 8px;border-radius:10px;background:#5b2a86;color:white;font-family:"Segoe UI",sans-serif;font-size:11px}
 .back-workspace{margin-left:auto;border:0;background:transparent;color:#5b2a86;cursor:pointer;font-size:18px}.side-doc{padding:14px 18px 8px;color:#5b2a86;font-weight:700}
 .section-list{flex:1;overflow:auto;padding:0 0 190px}.section-label{padding:12px 18px 5px;color:#86798e;font-family:"Segoe UI",sans-serif;font-size:11px;font-weight:750;letter-spacing:.08em}.section-button{display:block;width:100%;padding:7px 20px 7px calc(20px + var(--depth,0)*14px);border:0;background:transparent;color:#4c4652;text-align:left;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer}
+.section-group{padding:14px 18px 5px;color:#44235f;font-family:"Segoe UI","Microsoft YaHei",sans-serif;font-size:12px;font-weight:800}
 .section-button:hover,.section-button.is-active{background:#5b2a86;color:white}.highlight-row{display:grid;grid-template-columns:minmax(0,1fr) 30px;align-items:center}.highlight-row .section-button{padding-right:4px}.highlight-delete{width:28px;height:28px;border:0;background:transparent;color:#776d7d;cursor:pointer}.highlight-delete:hover{background:#e5d8ee;color:#5b2a86}.sidebar-footer{position:absolute;left:0;right:0;bottom:0;padding:10px 12px;border-top:1px solid #ddd5e5;background:#f0eaf6}
 .model-trigger{display:flex;justify-content:space-between;width:100%;height:38px;padding:0 10px;border:1px solid #cbb8dc;background:white;color:#44235f;align-items:center;cursor:pointer}.footer-tools{display:flex;justify-content:space-between;margin-top:8px;color:#77717e;font-family:"Segoe UI",sans-serif;font-size:12px}
 #study-reader{height:100vh;overflow:auto;padding:30px clamp(30px,4vw,56px) 100px;background:#fff;line-height:1.82;font-size:16px}
 #study-reader h1{margin:0 0 24px;font-size:30px}#study-reader h2{margin:28px 0 12px;font-size:22px}#study-reader h3{margin:22px 0 10px;font-size:18px}#study-reader p{margin:0 0 1.05em}
 #study-reader blockquote{margin:16px 0;padding:14px 16px;border-left:3px solid #147d75;background:#eef8f6;color:#3b4c49}#study-reader pre{overflow:auto;padding:12px;background:#f5f2f7}#study-reader code{font-family:Consolas,monospace}
 #study-reader table{width:100%;border-collapse:collapse}#study-reader th,#study-reader td{padding:8px;border:1px solid #d7d8dc}#study-reader img{display:block;max-width:100%;height:auto;margin:18px 0;border:1px solid #e1e2e6;border-radius:6px;background:#f8f9fb}#study-reader ::selection{background:#5b2a86;color:white}#study-reader::highlight(nju-reader-marks){background:#ffe58a;color:inherit;text-decoration:underline;text-decoration-color:#e7b93f;text-decoration-thickness:2px}
+#study-reader details[data-source-page-scan="true"]{margin:14px 0;padding:10px 13px;border:1px solid #e1d7ea;border-radius:7px;background:#faf8fc;color:#5f5666}#study-reader details[data-source-page-scan="true"] summary{cursor:pointer;color:#5b2a86;font-size:13px;font-weight:650}#study-reader details[data-source-page-scan="true"] img{margin:12px auto 2px}
 .math-block{display:block;max-width:100%;margin:14px 0;text-align:center;overflow-x:auto}.math-inline{display:inline}.katex-error{color:#b94b3c;font-family:Consolas,monospace}
 #sidebar-resizer,#reader-resizer{height:100vh;background:#ddd5e5;cursor:col-resize;transition:background .15s}#sidebar-resizer:hover,#reader-resizer:hover,#sidebar-resizer.is-dragging,#reader-resizer.is-dragging{background:#5b2a86}
 #study-canvas{position:relative;height:100vh;overflow:hidden;background-color:#f7f5f9;background-image:linear-gradient(#e5ddeb 1px,transparent 1px),linear-gradient(90deg,#e5ddeb 1px,transparent 1px);background-size:24px 24px}
@@ -210,7 +294,7 @@ WORKSPACE_JS = KATEX_JS + "\n" + (Path(__file__).resolve().parent / "reader_work
 
 
 _hall = st.components.v2.component("nju_library_hall", html=HALL_HTML, css=HALL_CSS, js=HALL_JS)
-_collection = st.components.v2.component("nju_library_collection", html=COLLECTION_HTML, css=COLLECTION_CSS, js=COLLECTION_JS)
+_collection = st.components.v2.component("nju_library_collection", html=COLLECTION_HTML, css=COLLECTION_CSS_V2, js=COLLECTION_JS_V2)
 _workspace = st.components.v2.component("nju_study_workspace", html=WORKSPACE_HTML, css=WORKSPACE_CSS, js=WORKSPACE_JS)
 
 
@@ -303,6 +387,7 @@ def render_study_workspace(
     *,
     title: str,
     markdown_source: str,
+    navigation_sections: list[dict] | None = None,
     models: list[dict],
     current_model: str,
     nodes: list[dict],
@@ -322,7 +407,8 @@ def render_study_workspace(
     asset_base_url: str = "",
     can_edit_document: bool = False,
 ):
-    reader_html, sections = _reader_html(markdown_source, asset_base_url)
+    reader_html, local_sections = _reader_html(markdown_source, asset_base_url)
+    sections = navigation_sections if navigation_sections is not None else local_sections
     rendered_nodes = [
         {
             **node,
@@ -371,4 +457,5 @@ def render_study_workspace(
         on_node_event_change=lambda: None,
         on_highlight_event_change=lambda: None,
         on_job_event_change=lambda: None,
+        on_section_document_change=lambda: None,
     )

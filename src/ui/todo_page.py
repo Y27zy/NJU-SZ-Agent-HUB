@@ -147,14 +147,17 @@ def render_todo_page(user_id: int) -> None:
         )
         hint_col, add_col = st.columns([0.74, 0.26], vertical_alignment="center")
         hint_col.caption("Agent 会识别独立成果、截止时间与依赖，并生成按顺序执行的步骤。")
-        if add_col.button("让 Agent 拆解", type="primary", use_container_width=True, disabled=not text.strip()):
-            try:
-                parsed = parse_and_save_todos(user_id, text)
-                update_working_memory(st.session_state, current_task_type="todo_parse", last_user_input=text, last_agent_output=f"已解析 {len(parsed)} 个任务")
-                st.toast(f"已加入 {len(parsed)} 个不重复任务。")
-                st.rerun()
-            except (LLMProviderError, ValueError) as exc:
-                st.error(str(exc))
+        if add_col.button("让 Agent 拆解", type="primary", use_container_width=True):
+            if not text.strip():
+                st.warning("请先输入需要拆解的任务。")
+            else:
+                try:
+                    parsed = parse_and_save_todos(user_id, text)
+                    update_working_memory(st.session_state, current_task_type="todo_parse", last_user_input=text, last_agent_output=f"已解析 {len(parsed)} 个任务")
+                    st.toast(f"已加入 {len(parsed)} 个不重复任务。")
+                    st.rerun()
+                except (LLMProviderError, ValueError) as exc:
+                    st.error(str(exc))
 
     with st.expander("智能规划", expanded=False):
         action_col, result_col = st.columns([0.3, 0.7], gap="large")

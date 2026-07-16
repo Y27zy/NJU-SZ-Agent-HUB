@@ -54,7 +54,7 @@ def _module_band() -> None:
 
 def _desk_strip(user_id: int) -> None:
     config = get_default_model_config(user_id)
-    docs = list_documents(user_id)
+    docs = [doc for doc in list_documents(user_id) if doc.get("document_role", "standalone") != "section"]
     todos = fetch_all("SELECT id FROM todos WHERE user_id = ? AND status != 'done'", (user_id,))
     model_name = escape(str(config["model_name"])) if config else "尚未配置"
     st.markdown(

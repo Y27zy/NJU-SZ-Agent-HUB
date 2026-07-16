@@ -1,9 +1,24 @@
 import unittest
 
-from src.rag.document_assets import bind_document_images
+from src.rag.document_assets import _is_full_page_scan, bind_document_images
 
 
 class DocumentAssetTests(unittest.TestCase):
+    def test_near_full_page_raster_is_not_treated_as_a_figure(self) -> None:
+        class Rect:
+            def __init__(self, width, height):
+                self.width = width
+                self.height = height
+
+        class Page:
+            rect = Rect(500, 700)
+
+            @staticmethod
+            def get_image_rects(_xref):
+                return [Rect(500, 700)]
+
+        self.assertTrue(_is_full_page_scan(Page(), 1))
+
     def test_only_explicitly_retained_figures_are_bound(self) -> None:
         source = (
             "# 资料\n\n<!-- page:3 -->\n\n### 回归 vs. 分类\n"

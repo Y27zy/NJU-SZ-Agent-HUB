@@ -16,6 +16,30 @@ _IMAGE_LINK = re.compile(r"!\[([^\]]*)\]\(([^\s)]+)(?:\s+\"[^\"]*\")?\)")
 _FIGURE_MARKER = re.compile(r"\[图\s*[：:]\s*([^\]\n]{1,180})\]")
 
 
+def _is_full_page_scan(page, xref: int, threshold: float = 0.85) -> bool:
+    """Reject rasterized PDF pages masquerading as embedded teaching figures."""
+    page_area = max(float(page.rect.width * page.rect.height), 1.0)
+    try:
+        return any(float(rect.width * rect.height) / page_area >= threshold for rect in page.get_image_rects(xref))
+    except Exception:
+        return False
+
+
+def full_page_scan_pages(source_path: str | Path) -> set[int]:
+    """Return pages containing a near-full-page raster image."""
+    path = Path(source_path)
+    if path.suffix.lower() != ".pdf" or not path.exists():
+        return set()
+    import fitz
+
+    result: set[int] = set()
+    with fitz.open(path) as document:
+        for page_number, page in enumerate(document, 1):
+            if any(_is_full_page_scan(page, int(image[0])) for image in page.get_images(full=True)):
+                result.add(page_number)
+    return result
+
+
 def document_asset_dir(document_id: int) -> Path:
     """Return the per-document directory used for extracted browser-safe assets."""
     return STORAGE_DIR / "document_assets" / str(int(document_id))
@@ -46,6 +70,8 @@ def inspect_pdf_figures(source_path: str | Path) -> dict[int, int]:
             count = 0
             for image in page.get_images(full=True):
                 xref, width, height = int(image[0]), int(image[2]), int(image[3])
+                if _is_full_page_scan(page, xref):
+                    continue
                 if xref in seen_xrefs or width * height < 18000 or min(width, height) < 70:
                     continue
                 if xref_frequency[xref] >= 3:
@@ -74,6 +100,8 @@ def extract_pdf_images(document_id: int, source_path: str | Path) -> dict[int, l
             figure_index = 0
             for image in page.get_images(full=True):
                 xref, width, height = int(image[0]), int(image[2]), int(image[3])
+                if _is_full_page_scan(page, xref):
+                    continue
                 if xref in written_xrefs or width * height < 18000 or min(width, height) < 70:
                     continue
                 if xref_frequency[xref] >= 3:
